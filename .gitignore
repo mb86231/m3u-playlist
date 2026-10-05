@@ -1,0 +1,18 @@
+config.json
+data/
+*.db
+*.sqlite
+*.sqlite3
+__pycache__/
+.venv/
+*.log
+
+# Secrets and local environment — never commit these
+.env
+.env.*
+!.env.example
+secrets.json
+
+# Temporary scratch files and local backups
+tmp_*
+data-backup-*
