@@ -9,7 +9,7 @@ Push to `main` on `git.example.com/<owner>/m3u-playlist` triggers
 1. **test** — clones the repo into `/tmp/m3u-test`, installs
    `requirements-dev.txt`, runs `pytest -q`. Deploy is skipped on failure.
 2. **deploy** — syncs `deploy-m3u-library.sh` from the repo to
-   `/home/codex/deploy-m3u-library.sh`, then runs it:
+   `/home/<deploy-user>/deploy-m3u-library.sh`, then runs it:
    - updates `/opt/apps/m3u-library` to `origin/main`
    - (re)creates the venv and installs `requirements.txt`
    - regenerates a fresh random `API_KEY` in `/var/lib/apps/m3u-library/.env`
@@ -19,7 +19,7 @@ Push to `main` on `git.example.com/<owner>/m3u-playlist` triggers
    returns `403` (auth enforced) and `/api/status` responds.
 
 The deploy script is the source of truth and lives in the repo; the copy at
-`/home/codex/deploy-m3u-library.sh` is refreshed from the repo on every
+`/home/<deploy-user>/deploy-m3u-library.sh` is refreshed from the repo on every
 deploy.
 
 Note: `deploy-m3u-library.sh` enables `m3u-library-refresh.service` but not
