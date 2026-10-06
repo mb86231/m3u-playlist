@@ -95,6 +95,7 @@ _I18N_JS = r"""
         lbl_m3u_url: "M3U playlist URL",
         hint_m3u: "The playlist link of your streaming provider. Stored in the server-side .env file (mode 0600), never in Git. Credentials inside the URL are masked in logs and status messages.",
         btn_show: "Show", btn_hide: "Hide", btn_delete: "Delete",
+        tooltip_show: "Show value", tooltip_hide: "Hide value", tooltip_delete: "Delete value",
         lbl_tmdb_key: "TMDB API key (v3)", lbl_tmdb_bearer: "TMDB bearer token (v4)",
         hint_tmdb: "Either TMDB credential is enough for movie and series metadata. Create one at themoviedb.org → Settings → API.",
         lbl_meta_lang: "Metadata language",
@@ -215,6 +216,7 @@ _I18N_JS = r"""
         lbl_m3u_url: "M3U-Playlist-URL",
         hint_m3u: "Der Playlist-Link deines Streaming-Anbieters. Gespeichert in der serverseitigen .env-Datei (Modus 0600), niemals in Git. Zugangsdaten in der URL werden in Logs und Statusmeldungen maskiert.",
         btn_show: "Anzeigen", btn_hide: "Ausblenden", btn_delete: "Löschen",
+        tooltip_show: "Wert anzeigen", tooltip_hide: "Wert ausblenden", tooltip_delete: "Wert löschen",
         lbl_tmdb_key: "TMDB-API-Schlüssel (v3)", lbl_tmdb_bearer: "TMDB-Bearer-Token (v4)",
         hint_tmdb: "Einer der beiden TMDB-Zugänge genügt für Metadaten zu Filmen und Serien. Erstellbar auf themoviedb.org → Einstellungen → API.",
         lbl_meta_lang: "Sprache der Metadaten",
@@ -1915,18 +1917,18 @@ SETTINGS_HTML = r"""<!doctype html>
     .ghost { background: transparent; }
     a { color: var(--accent); }
 
-    .page { max-width: 760px; margin: 0 auto; padding: 28px 20px 64px; }
-    header.top { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 22px; flex-wrap: wrap; }
-    .brand { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 18px; color: var(--accent); }
-    h1 { margin: 0; font-size: 22px; }
-    h2 { font-size: 1.05rem; margin: 0 0 14px; }
+    .page { max-width: 880px; margin: 0 auto; padding: 36px 24px 80px; }
+    header.top { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 26px; padding-bottom: 18px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+    .brand { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 20px; color: var(--accent); }
+    h1 { margin: 0; font-size: 24px; }
+    h2 { font-size: 1.05rem; margin: 0 0 18px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
     .card {
       background: var(--panel); border: 1px solid var(--line);
-      border-radius: var(--radius); padding: 20px; margin-bottom: 18px;
+      border-radius: 14px; padding: 24px; margin-bottom: 20px;
     }
-    label { display: block; font-size: 0.9rem; font-weight: 600; margin: 16px 0 5px; }
+    label { display: block; font-size: 0.9rem; font-weight: 600; margin: 20px 0 6px; }
     label:first-of-type { margin-top: 0; }
-    .hint { font-size: 0.8rem; color: var(--muted); font-weight: 400; margin: 4px 0 0; }
+    .hint { font-size: 0.8rem; color: var(--muted); font-weight: 400; margin: 6px 0 0; line-height: 1.5; }
     input[type="password"], input[type="text"] {
       width: 100%; padding: 9px 12px; min-height: 38px;
       background: var(--panel-2); color: var(--text);
@@ -1940,14 +1942,34 @@ SETTINGS_HTML = r"""<!doctype html>
     .badge { font-size: 0.75rem; padding: 2px 8px; border-radius: 99px; border: 1px solid var(--line); color: var(--muted); }
     .badge.set { border-color: var(--success); color: var(--success); }
 
-    .tabs { display: flex; gap: 6px; margin-bottom: 18px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+    .tabs {
+      display: flex; gap: 6px; margin-bottom: 24px; padding: 5px;
+      background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+      width: fit-content; flex-wrap: wrap;
+    }
     .tab {
-      background: transparent; border: none; border-bottom: 2px solid transparent;
-      color: var(--muted); padding: 9px 14px; font-size: 14px; border-radius: 6px 6px 0 0;
+      background: transparent; border: none; color: var(--muted);
+      padding: 8px 18px; font-size: 14px; font-weight: 600; border-radius: 9px;
     }
     .tab:hover { color: var(--text); }
-    .tab[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+    .tab[aria-selected="true"] { background: var(--accent-soft); color: var(--accent); }
     .tab-panel[hidden] { display: none; }
+
+    .secret-wrap { position: relative; }
+    .secret-wrap > input { padding-right: 84px; }
+    .secret-wrap.single > input { padding-right: 44px; }
+    .secret-actions { position: absolute; right: 5px; top: 50%; transform: translateY(-50%); display: flex; gap: 4px; }
+    .icon-btn {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 30px; height: 30px; padding: 0; border-radius: 8px;
+      background: transparent; border: 1px solid transparent; color: var(--muted);
+    }
+    .icon-btn:hover { color: var(--accent); border-color: var(--line); background: var(--bg-2); }
+    .icon-btn.danger:hover { color: var(--error); }
+    .save-row { display: flex; align-items: center; justify-content: flex-end; gap: 16px; margin-top: 24px; flex-wrap: wrap; }
+    .save-row .status { margin-top: 0; text-align: right; }
+    .save-row .primary { padding: 10px 26px; }
+    .regen-row { margin-top: 14px; }
 
     .source-status {
       display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
@@ -2014,10 +2036,17 @@ SETTINGS_HTML = r"""<!doctype html>
           <h2 data-i18n="h_source_metadata">Quelle &amp; Metadaten</h2>
           <form id="settingsForm">
             <label for="M3U_URL" data-i18n="lbl_m3u_url">M3U-Playlist-URL</label>
-            <div class="row">
+            <div class="secret-wrap">
               <input type="password" id="M3U_URL" autocomplete="off" placeholder="https://anbieter.example/playlist.m3u">
-              <button type="button" class="ghost" data-toggle="M3U_URL" data-i18n="btn_show">Anzeigen</button>
-              <button type="button" class="ghost" data-clear="M3U_URL" data-i18n="btn_delete">Löschen</button>
+              <div class="secret-actions">
+                <button type="button" class="icon-btn" data-toggle="M3U_URL" aria-label="Anzeigen">
+                  <svg class="ic-eye" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                  <svg class="ic-eyeoff" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" hidden><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                </button>
+                <button type="button" class="icon-btn danger" data-clear="M3U_URL" aria-label="Löschen">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                </button>
+              </div>
             </div>
             <p class="hint" data-i18n="hint_m3u">Der Playlist-Link deines Streaming-Anbieters. Gespeichert in der serverseitigen .env-Datei (Modus 0600), niemals in Git. Zugangsdaten in der URL werden in Logs und Statusmeldungen maskiert.</p>
 
@@ -2031,29 +2060,49 @@ SETTINGS_HTML = r"""<!doctype html>
             <div class="status" id="checkSourceStatus" aria-live="polite"></div>
 
             <label for="TMDB_API_KEY" data-i18n="lbl_tmdb_key">TMDB-API-Schlüssel (v3)</label>
-            <div class="row">
+            <div class="secret-wrap">
               <input type="password" id="TMDB_API_KEY" autocomplete="off" placeholder="optional, falls Bearer-Token gesetzt">
-              <button type="button" class="ghost" data-toggle="TMDB_API_KEY" data-i18n="btn_show">Anzeigen</button>
-              <button type="button" class="ghost" data-clear="TMDB_API_KEY" data-i18n="btn_delete">Löschen</button>
+              <div class="secret-actions">
+                <button type="button" class="icon-btn" data-toggle="TMDB_API_KEY" aria-label="Anzeigen">
+                  <svg class="ic-eye" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                  <svg class="ic-eyeoff" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" hidden><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                </button>
+                <button type="button" class="icon-btn danger" data-clear="TMDB_API_KEY" aria-label="Löschen">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                </button>
+              </div>
             </div>
 
             <label for="TMDB_BEARER_TOKEN" data-i18n="lbl_tmdb_bearer">TMDB-Bearer-Token (v4)</label>
-            <div class="row">
+            <div class="secret-wrap">
               <input type="password" id="TMDB_BEARER_TOKEN" autocomplete="off" placeholder="optional, falls API-Schlüssel gesetzt">
-              <button type="button" class="ghost" data-toggle="TMDB_BEARER_TOKEN" data-i18n="btn_show">Anzeigen</button>
-              <button type="button" class="ghost" data-clear="TMDB_BEARER_TOKEN" data-i18n="btn_delete">Löschen</button>
+              <div class="secret-actions">
+                <button type="button" class="icon-btn" data-toggle="TMDB_BEARER_TOKEN" aria-label="Anzeigen">
+                  <svg class="ic-eye" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                  <svg class="ic-eyeoff" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" hidden><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                </button>
+                <button type="button" class="icon-btn danger" data-clear="TMDB_BEARER_TOKEN" aria-label="Löschen">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                </button>
+              </div>
             </div>
             <p class="hint" data-i18n="hint_tmdb">Einer der beiden TMDB-Zugänge genügt für Metadaten zu Filmen und Serien. Erstellbar auf themoviedb.org → Einstellungen → API.</p>
 
             <label for="METADATA_LANGUAGE" data-i18n="lbl_meta_lang">Sprache der Metadaten</label>
-            <div class="row">
+            <div class="secret-wrap single">
               <input type="text" id="METADATA_LANGUAGE" autocomplete="off" placeholder="de-DE">
-              <button type="button" class="ghost" data-clear="METADATA_LANGUAGE" data-i18n="btn_delete">Löschen</button>
+              <div class="secret-actions">
+                <button type="button" class="icon-btn danger" data-clear="METADATA_LANGUAGE" aria-label="Löschen">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                </button>
+              </div>
             </div>
             <p class="hint" data-i18n="hint_meta_lang">TMDB-Sprachcode, z. B. de-DE, en-US, fr-FR.</p>
 
-            <p><button type="submit" class="primary" data-i18n="btn_save">Änderungen speichern</button></p>
-            <div class="status" id="settingsStatus" aria-live="polite"></div>
+            <div class="save-row">
+              <div class="status" id="settingsStatus" aria-live="polite"></div>
+              <button type="submit" class="primary" data-i18n="btn_save">Änderungen speichern</button>
+            </div>
           </form>
         </div>
 
@@ -2073,11 +2122,15 @@ SETTINGS_HTML = r"""<!doctype html>
           <h2 data-i18n="h_external_clients">Externe Clients</h2>
           <p class="hint" data-i18n="hint_api_key">Skripte wie der systemd-Aktualisierungs-Timer authentifizieren sich über diesen Schlüssel im <code>X-API-Key</code>-Header gegen geschützte Endpunkte.</p>
           <p><span data-i18n="apikey_status">Status:</span> <span class="badge" id="badge-API_KEY">nicht gesetzt</span></p>
-          <div class="row">
+          <div class="secret-wrap single">
             <input type="text" id="API_KEY" readonly placeholder="••••">
-            <button type="button" class="ghost" id="revealKey" data-i18n="btn_reveal">Anzeigen</button>
-            <button type="button" class="ghost" id="regenKey" data-i18n="btn_regenerate">Neu generieren</button>
+            <div class="secret-actions">
+              <button type="button" class="icon-btn" id="revealKey" aria-label="Anzeigen">
+                <svg class="ic-eye" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+            </div>
           </div>
+          <p class="regen-row"><button type="button" class="button" id="regenKey" data-i18n="btn_regenerate">Neu generieren</button></p>
           <div class="status" id="keyStatus" aria-live="polite"></div>
         </div>
       </div>
@@ -2092,8 +2145,10 @@ SETTINGS_HTML = r"""<!doctype html>
             <input type="password" id="newPassword" autocomplete="new-password" required>
             <label for="newPassword2" data-i18n="lbl_new_pw2">Neues Passwort wiederholen</label>
             <input type="password" id="newPassword2" autocomplete="new-password" required>
-            <p><button type="submit" class="primary" data-i18n="btn_change_password">Passwort ändern</button></p>
-            <div class="status" id="passwordStatus" aria-live="polite"></div>
+            <div class="save-row">
+              <div class="status" id="passwordStatus" aria-live="polite"></div>
+              <button type="submit" class="primary" data-i18n="btn_change_password">Passwort ändern</button>
+            </div>
           </form>
         </div>
       </div>
@@ -2300,7 +2355,11 @@ __I18N_INLINE__
         const input = document.getElementById(button.dataset.toggle);
         const show = input.type === "password";
         input.type = show ? "text" : "password";
-        button.textContent = t(show ? "btn_hide" : "btn_show");
+        const eye = button.querySelector(".ic-eye");
+        const eyeoff = button.querySelector(".ic-eyeoff");
+        if (eye && eyeoff) { eye.hidden = show; eyeoff.hidden = !show; }
+        button.title = t(show ? "tooltip_hide" : "tooltip_show");
+        button.setAttribute("aria-label", button.title);
       });
     });
 
@@ -2345,6 +2404,10 @@ __I18N_INLINE__
     /* Statische Texte beim Start setzen */
     applyStaticI18n();
     document.title = t("settings_title") + " · M3U Library";
+    document.querySelectorAll("[data-toggle]").forEach((b) => { b.title = t("tooltip_show"); b.setAttribute("aria-label", b.title); });
+    document.querySelectorAll("[data-clear]").forEach((b) => { b.title = t("tooltip_delete"); b.setAttribute("aria-label", b.title); });
+    const revealBtn = document.getElementById("revealKey");
+    if (revealBtn) { revealBtn.title = t("tooltip_show"); revealBtn.setAttribute("aria-label", revealBtn.title); }
 
     document.getElementById("logout").addEventListener("click", async () => {
       await fetch("/api/auth/logout", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });

@@ -16,6 +16,9 @@ watched progress, and source health](docs/screenshot.jpg)
 ![Series detail: episode progress, season tabs, watched toggles, and
 next-episode handoff](docs/screenshot-series.jpg)
 
+![Settings: tabbed admin page for playlist source, TMDB credentials, API key,
+and admin password — secrets stay server-side](docs/screenshot-settings.jpg)
+
 ## Features
 
 - **Library browser** — movies, series (grouped with episode navigation),
