@@ -70,6 +70,36 @@ sudo systemctl start m3u-library.service
 Timestamped pre-migration backups (`app.db.pre-stable-ids-*`) may still
 exist in the data dir from the stable-ID migration.
 
+## Watched/favorite state snapshots
+
+After every successful refresh the app writes a compact snapshot of all
+watched/favorite state to `$DATA_DIR/state-snapshots/`: `latest.json` plus
+`snapshot-<refresh-timestamp>.json` (30 kept). This protects user state
+(watched episodes, favorites) independent of full database backups — a
+refresh glitch or a bad migration can no longer silently lose it.
+
+```bash
+# list available snapshots (needs the API key)
+curl -s -H "X-API-Key: <key>" http://198.51.100.49:8000/api/state/snapshots
+
+# restore watched/favorite state (only state columns are written;
+# ids missing from the current library are reported as missing)
+curl -s -X POST -H "X-API-Key: <key>" \
+  "http://198.51.100.49:8000/api/state/restore?file=latest.json"
+```
+
+Server-side helper (runs directly against the SQLite database, so stop
+the service first):
+
+```bash
+sudo systemctl stop m3u-library.service
+sudo python3 scripts/restore_state.py [snapshot-name]   # default: latest.json
+sudo systemctl start m3u-library.service
+```
+
+After a restore, `last_refresh` is bumped (API restore) resp. should be
+refreshed so open browser tabs pick up the restored state.
+
 ## Useful commands
 
 ```bash

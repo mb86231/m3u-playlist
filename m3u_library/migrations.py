@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sqlite3
 from datetime import datetime, timezone
 from typing import Callable
@@ -149,6 +150,87 @@ def _migration_01_initial_schema(conn: sqlite3.Connection) -> None:
 
 _MIGRATIONS: list[tuple[int, str, MigrationFn]] = [
     (1, "initial schema", _migration_01_initial_schema),
+]
+
+
+_METADATA_COLUMNS = (
+    "item_id", "provider", "media_type", "provider_id", "query", "title",
+    "release_date", "rating", "votes", "description", "poster_url",
+    "provider_url", "cached_at",
+)
+
+
+def _metadata_fk_target(conn: sqlite3.Connection) -> str | None:
+    """Return the table the metadata FK points to, or None if there is no FK."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'metadata'"
+    ).fetchone()
+    if not row or not row[0]:
+        return None
+    match = re.search(r'REFERENCES\s+"?([A-Za-z_]\w*)"', row[0], re.IGNORECASE)
+    return match.group(1) if match else None
+
+
+def _migration_02_fix_metadata_foreign_key(conn: sqlite3.Connection) -> None:
+    """Repair the metadata FK left pointing at items_old.
+
+    The one-off stable-ids migration renamed items to items_old and rebuilt
+    metadata from the renamed table, so the new metadata table ended up with
+    ``REFERENCES items_old(id)``. items_old was then dropped, which makes
+    every metadata INSERT/UPDATE fail with ``no such table: main.items_old``
+    as soon as PRAGMA foreign_keys is enabled. Rebuild the table with the
+    canonical FK; rows whose item_id no longer exists are dropped.
+    """
+    target = _metadata_fk_target(conn)
+    if target is None:
+        conn.executescript(_SCHEMA)
+        return
+    if target == "items":
+        return
+
+    conn.execute("DROP TABLE IF EXISTS metadata_broken_fk")
+    conn.execute("ALTER TABLE metadata RENAME TO metadata_broken_fk")
+    conn.execute(
+        """
+        CREATE TABLE metadata (
+          item_id TEXT PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,
+          provider TEXT NOT NULL,
+          media_type TEXT NOT NULL,
+          provider_id TEXT,
+          query TEXT NOT NULL,
+          title TEXT,
+          release_date TEXT,
+          rating REAL,
+          votes INTEGER,
+          description TEXT,
+          poster_url TEXT,
+          provider_url TEXT,
+          cached_at TEXT NOT NULL
+        )
+        """
+    )
+    columns = ", ".join(_METADATA_COLUMNS)
+    orphans = conn.execute(
+        """
+        SELECT COUNT(*) FROM metadata_broken_fk AS b
+        WHERE NOT EXISTS (SELECT 1 FROM items AS i WHERE i.id = b.item_id)
+        """
+    ).fetchone()[0]
+    conn.execute(
+        f"""
+        INSERT INTO metadata({columns})
+        SELECT {columns} FROM metadata_broken_fk AS b
+        WHERE EXISTS (SELECT 1 FROM items AS i WHERE i.id = b.item_id)
+        """
+    )
+    conn.execute("DROP TABLE metadata_broken_fk")
+    if orphans:
+        print(f"dropped {orphans} metadata rows with missing items during FK repair")
+
+
+_MIGRATIONS: list[tuple[int, str, MigrationFn]] = [
+    (1, "initial schema", _migration_01_initial_schema),
+    (2, "fix metadata foreign key target", _migration_02_fix_metadata_foreign_key),
 ]
 
 

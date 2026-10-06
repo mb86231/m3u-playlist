@@ -5,7 +5,7 @@ This file tracks proposals and improvements that are **not** part of the current
 ## Backend
 
 - **Structured logging** — Replace `print()` calls with stdlib `logging` or `structlog`; include request IDs and structured context.
-- **Test suite expansion** — Add tests for read endpoints (`/api/items`, `/api/series`, `/api/last-watched`), metadata endpoints, and streaming helpers.
+- **Test suite expansion** — Add tests for read endpoints (`/api/items`, `/api/series`), metadata endpoints, and streaming helpers.
 - **Metadata warmup retry/backoff strategy** — Implement exponential backoff and per-provider/per-entity failure tracking instead of fixed 0.25 s delays.
 - ~~**Authentication / API keys** — Protect admin endpoints (`POST /api/refresh`, `/api/metadata/*`) with bearer tokens or session auth.~~
 - ~~**Schema migration table** — Replace ad-hoc `PRAGMA table_info` checks with a versioned `migrations` table and migration runner.~~

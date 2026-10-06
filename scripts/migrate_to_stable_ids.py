@@ -99,6 +99,9 @@ def _create_table_like(conn: sqlite3.Connection, old_name: str, new_name: str) -
     sql = sql.replace(f"CREATE TABLE {old_name}", f"CREATE TABLE {new_name}", 1)
     # Metadata references items (now named items_old); keep the reference correct.
     sql = sql.replace(old_name, new_name)
+    # After the renames the copied schema can still reference the renamed-away
+    # sibling tables (e.g. metadata's FK ends up as REFERENCES "items_old").
+    sql = sql.replace("items_old", "items").replace("metadata_old", "metadata")
     conn.execute(sql)
 
 

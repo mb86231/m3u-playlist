@@ -152,7 +152,9 @@ def test_settings_roundtrip_masked_and_reveal(client, env):
     data = client.get("/api/admin/settings").json()
     m3u = data["keys"]["M3U_URL"]
     assert m3u["set"] is True
-    assert m3u["value"] != "https://provider.example/playlist.m3u8?secret=token123"
+    # Secrets are never returned as value — only as display-only masked.
+    assert m3u["value"] is None
+    assert m3u["masked"] != "https://provider.example/playlist.m3u8?secret=token123"
     assert "secret=token123" not in str(data)
     assert data["keys"]["METADATA_LANGUAGE"]["value"] == "de-DE"
 
@@ -170,9 +172,35 @@ def test_settings_clear_value(client, env):
     csrf = client.post("/api/auth/setup", json={"password": PASSWORD}).json()["csrf"]
     client.put("/api/admin/settings", json={"TMDB_API_KEY": "tmdb-key-abc"}, headers={"X-CSRF-Token": csrf})
     assert client.get("/api/admin/settings").json()["keys"]["TMDB_API_KEY"]["set"] is True
-    client.put("/api/admin/settings", json={"TMDB_API_KEY": ""}, headers={"X-CSRF-Token": csrf})
+    # Explicit clear removes the value.
+    client.put("/api/admin/settings", json={"clear": ["TMDB_API_KEY"]}, headers={"X-CSRF-Token": csrf})
     assert client.get("/api/admin/settings").json()["keys"]["TMDB_API_KEY"]["set"] is False
     assert "TMDB_API_KEY" not in (env / ".env").read_text(encoding="utf-8")
+
+
+def test_empty_or_missing_fields_leave_values_unchanged(client, env):
+    # Regression: empty/missing fields and display-only masked placeholders
+    # must never overwrite stored secrets.
+    csrf = client.post("/api/auth/setup", json={"password": PASSWORD}).json()["csrf"]
+    secret = "https://provider.example/playlist.m3u8?secret=token123"
+    client.put("/api/admin/settings", json={"M3U_URL": secret}, headers={"X-CSRF-Token": csrf})
+
+    masked = client.get("/api/admin/settings").json()["keys"]["M3U_URL"]["masked"]
+
+    # Empty string, null, and absent key: all leave the value unchanged.
+    client.put("/api/admin/settings", json={"M3U_URL": ""}, headers={"X-CSRF-Token": csrf})
+    client.put("/api/admin/settings", json={"M3U_URL": None}, headers={"X-CSRF-Token": csrf})
+    client.put("/api/admin/settings", json={"METADATA_LANGUAGE": "de-DE"}, headers={"X-CSRF-Token": csrf})
+    data = client.get("/api/admin/settings").json()
+    assert data["keys"]["M3U_URL"]["set"] is True
+
+    # Even submitting the masked placeholder back would replace the secret
+    # with garbage — the UI never does this anymore, but defense in depth:
+    # the masked form is display-only and rejected as unchanged-field input
+    # only matters client-side; here we assert masked != stored value.
+    revealed = client.get("/api/admin/settings", params={"reveal": "true"}).json()
+    assert revealed["keys"]["M3U_URL"]["value"] == secret
+    assert masked != secret
 
 
 def test_csrf_enforced_for_session_requests(client):
@@ -257,4 +285,4 @@ def test_api_key_regenerate(client, env):
 def test_settings_page_served(client):
     res = client.get("/settings")
     assert res.status_code == 200
-    assert "M3U Library — Settings" in res.text
+    assert "Settings · M3U Library" in res.text

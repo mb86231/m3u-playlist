@@ -91,7 +91,7 @@ class Database:
             conn.row_factory = aiosqlite.Row
             await conn.execute("PRAGMA journal_mode=WAL")
             await conn.execute("PRAGMA foreign_keys=ON")
-            await conn.execute("PRAGMA busy_timeout=10000")
+            await conn.execute("PRAGMA busy_timeout=30000")
             while True:
                 job = await self._write_queue.get()
                 if isinstance(job, _StopJob):
@@ -110,11 +110,13 @@ class Database:
     @asynccontextmanager
     async def read(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        async with aiosqlite.connect(self.path, timeout=10.0) as conn:
+        async with aiosqlite.connect(self.path, timeout=30.0) as conn:
             conn.row_factory = aiosqlite.Row
             await conn.execute("PRAGMA journal_mode=WAL")
             await conn.execute("PRAGMA foreign_keys=ON")
-            await conn.execute("PRAGMA busy_timeout=5000")
+            # Long writer transactions (refresh / metadata warmup) can hold
+            # the write lock for many seconds; readers must wait, not 500.
+            await conn.execute("PRAGMA busy_timeout=30000")
             yield conn
 
     async def write(self, fn: Callable[[aiosqlite.Connection], Awaitable[T]]) -> T:

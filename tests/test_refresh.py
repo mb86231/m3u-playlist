@@ -98,3 +98,93 @@ def test_refresh_updates_url_without_orphaning_state(client, tmp_path):
     row = conn.execute("SELECT is_watched, stream_url FROM items WHERE id = ?", (movie_id,)).fetchone()
     assert row["is_watched"] == 1
     assert "_NEW" in row["stream_url"]
+
+
+def test_refresh_dedupes_duplicate_ids_in_playlist(client, tmp_path):
+    """Providers may list the same movie twice (quality variants). Item ids are
+    content-derived, so both lines share one id — refresh must not crash with
+    UNIQUE constraint failed: items.id."""
+    m3u_path = tmp_path / "test.m3u"
+    _write_m3u_file(m3u_path, [
+        ("Dup Movie", "http://example.com/movie/dup_1080.mp4"),
+        ("Dup Movie", "http://example.com/movie/dup_4k.mp4"),
+        ("Other Movie", "http://example.com/movie/other.mp4"),
+    ])
+    os.environ["M3U_URL"] = m3u_path.as_uri()
+
+    res = client.post("/api/refresh", headers={"X-API-Key": API_KEY})
+    assert res.status_code == 200
+    data = res.json()
+    assert data["added"] == 2
+    assert data["removed"] >= 0
+
+    conn = sqlite3.connect(str(main.DB_PATH))
+    rows = conn.execute("SELECT COUNT(*) AS n FROM items WHERE title = 'Dup Movie'").fetchone()
+    conn.close()
+    assert rows[0] == 1
+
+
+def test_continue_watching_section(client, tmp_path):
+    """Continue Watching = series started (>=1 episode watched) but not finished."""
+    m3u_path = tmp_path / "test.m3u"
+    _write_m3u_file(m3u_path, [
+        ("Progress Show S01 E01", "http://example.com/series/progress/1/1.mp4"),
+        ("Progress Show S01 E02", "http://example.com/series/progress/1/2.mp4"),
+        ("Done Show S01 E01", "http://example.com/series/done/1/1.mp4"),
+    ])
+    os.environ["M3U_URL"] = m3u_path.as_uri()
+    res = client.post("/api/refresh", headers={"X-API-Key": API_KEY})
+    assert res.status_code == 200
+
+    # /api/items always consults TMDB trending/popular/upcoming; stub them
+    # (no network, no TMDB key in the test environment).
+    async def _empty_ids(conn):
+        return {"movie_ids": set(), "series_ids": set()}
+
+    async def _empty_upcoming(conn):
+        return {"items": []}
+
+    mp = pytest.MonkeyPatch()
+    mp.setattr(main, "async_trending_library_ids", _empty_ids)
+    mp.setattr(main, "async_popular_library_ids", _empty_ids)
+    mp.setattr(main, "async_get_upcoming_snapshot", _empty_upcoming)
+
+    conn = sqlite3.connect(str(main.DB_PATH))
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("SELECT id, title FROM items WHERE kind = 'series'").fetchall()
+    ids = {row["title"]: row["id"] for row in rows}
+    conn.close()
+
+    # Start Progress Show (1 of 2), finish Done Show (1 of 1).
+    client.post(f"/api/items/{ids['Progress Show S01 E01']}/watched", headers={"X-API-Key": API_KEY})
+    client.post(f"/api/items/{ids['Done Show S01 E01']}/watched", headers={"X-API-Key": API_KEY})
+
+    res = client.get("/api/items", params={"section": "continue"})
+    assert res.status_code == 200
+    data = res.json()
+    assert data["matched"] == 1
+    assert data["items"][0]["title"] == "Progress Show"
+    assert data["section_counts"]["continue"] == 1
+
+    res = client.get("/api/series", params={"section": "continue"})
+    assert res.status_code == 200
+    assert res.json()["matched"] == 1
+
+    # Watched = abgeschlossen: nur die komplett gesehene Serie, die angefangene
+    # Serie darf hier nicht auftauchen (Regression: frueher zaehlte jede
+    # gesehene Folge als "watched").
+    res = client.get("/api/series", params={"section": "watched"})
+    assert res.status_code == 200
+    data = res.json()
+    assert data["matched"] == 1
+    assert data["items"][0]["title"] == "Done Show"
+    assert data["section_counts"]["watched"] == 1
+
+    # Gemischte Items-Ansicht wendet dieselbe Abgeschlossen-Regel an.
+    res = client.get("/api/items", params={"section": "watched", "kind": "series"})
+    assert res.status_code == 200
+    data = res.json()
+    assert data["matched"] == 1
+    assert data["items"][0]["title"] == "Done Show"
+    assert data["section_counts"]["watched"] == 1
+    mp.undo()

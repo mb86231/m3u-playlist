@@ -6,35 +6,31 @@ import html as html_lib
 import json
 import os
 import re
-import shutil
-import subprocess
 import time
 import sqlite3
-import threading
 import aiosqlite
 import asyncio
 import urllib.error
 import urllib.parse
 import urllib.request
-import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Security, status
-from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, Response
 from fastapi.security import APIKeyHeader
 
 from m3u_library import migrations
 from m3u_library import settings
+from m3u_library.pages import LIBRARY_HTML, SETTINGS_HTML
 from m3u_library.db import db as ASYNC_DB, init_db as async_init_db, read_db, write_db, get_state as async_get_state, set_state as async_set_state
 
 
 APP_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.getenv("DATA_DIR", "/var/lib/apps/m3u-library"))
 DB_PATH = Path(os.getenv("DATABASE_PATH", DATA_DIR / "app.db"))
-TRANSCODE_ROOT = DATA_DIR / "transcode"
 ENV_PATHS = [DATA_DIR / ".env", APP_DIR / ".env"]
 
 MAX_WARMUP_PER_RUN = 100
@@ -79,16 +75,13 @@ async def startup() -> None:
 
 
 METADATA_WARMUP_TASK: asyncio.Task | None = None
-TRANSCODE_LOCK = threading.Lock()
-ACTIVE_TRANSCODES: dict[str, dict[str, Any]] = {}
-
-
 @app.middleware("http")
 async def disable_cache(request: Request, call_next):
     response = await call_next(request)
-    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-    response.headers["Pragma"] = "no-cache"
-    response.headers["Expires"] = "0"
+    if "cache-control" not in response.headers:
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
     return response
 
 
@@ -141,794 +134,6 @@ async def async_new_since_for_window(conn: aiosqlite.Connection, new_window: str
     except ValueError:
         return await async_get_state(conn, "last_refresh") or ""
     return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
-
-
-def ffmpeg_available() -> bool:
-    return shutil.which("ffmpeg") is not None
-
-
-def ffprobe_available() -> bool:
-    return shutil.which("ffprobe") is not None
-
-
-def vaapi_device() -> str | None:
-    for candidate in ("/dev/dri/renderD128", "/dev/dri/renderD129"):
-        if Path(candidate).exists():
-            return candidate
-    return None
-
-
-def ffmpeg_video_args(for_streaming: bool) -> tuple[list[str], str]:
-    device = vaapi_device()
-    if device:
-        if for_streaming:
-            return (
-                [
-                    "-vaapi_device",
-                    device,
-                    "-vf",
-                    "scale='min(1280,iw)':-2,format=nv12,hwupload",
-                    "-rc_mode",
-                    "CQP",
-                    "-qp",
-                    "23",
-                    "-c:v",
-                    "h264_vaapi",
-                    "-g",
-                    "48",
-                    "-keyint_min",
-                    "48",
-                    "-bf",
-                    "0",
-                ],
-                "VAAPI GPU",
-            )
-        return (
-            [
-                "-vaapi_device",
-                device,
-                "-vf",
-                "scale='min(1280,iw)':-2,format=nv12,hwupload",
-                "-rc_mode",
-                "CQP",
-                "-qp",
-                "23",
-                "-c:v",
-                "h264_vaapi",
-            ],
-            "VAAPI GPU",
-        )
-
-    if for_streaming:
-        return (
-            [
-                "-c:v",
-                "libx264",
-                "-preset",
-                "superfast",
-                "-tune",
-                "zerolatency",
-                "-crf",
-                "23",
-                "-vf",
-                "scale='min(1280,iw)':-2",
-                "-maxrate",
-                "3500k",
-                "-bufsize",
-                "7000k",
-                "-g",
-                "48",
-                "-keyint_min",
-                "48",
-                "-sc_threshold",
-                "0",
-            ],
-            "CPU x264",
-        )
-    return (
-        [
-            "-c:v",
-            "libx264",
-            "-preset",
-            "superfast",
-            "-crf",
-            "23",
-            "-vf",
-            "scale='min(1280,iw)':-2",
-            "-maxrate",
-            "3500k",
-            "-bufsize",
-            "7000k",
-        ],
-        "CPU x264",
-    )
-
-
-def browser_playback_mode(stream_url: str) -> str:
-    parsed = urllib.parse.urlparse(stream_url)
-    path = (parsed.path or "").lower()
-    if path.endswith(".m3u8"):
-        return "hls"
-    if path.endswith(".mp4") or path.endswith(".webm"):
-        return "native"
-    return "transcode"
-
-
-def is_http_stream(stream_url: str) -> bool:
-    scheme = urllib.parse.urlparse(stream_url).scheme.lower()
-    return scheme in {"http", "https"}
-
-
-def probe_streams(stream_url: str) -> dict[str, Any]:
-    if not ffprobe_available():
-        raise HTTPException(503, "ffprobe is not installed on the server yet")
-
-    input_args: list[str] = []
-    if is_http_stream(stream_url):
-        input_args = [
-            "-reconnect",
-            "1",
-            "-reconnect_streamed",
-            "1",
-            "-reconnect_on_network_error",
-            "1",
-            "-reconnect_on_http_error",
-            "4xx,5xx",
-            "-reconnect_delay_max",
-            "2",
-        ]
-
-    command = [
-        "ffprobe",
-        "-v",
-        "error",
-        "-print_format",
-        "json",
-        "-show_streams",
-        *input_args,
-        stream_url,
-    ]
-    try:
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="ignore",
-            timeout=30,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise HTTPException(504, "ffprobe timed out while checking the source stream") from exc
-    except OSError as exc:
-        raise HTTPException(500, f"Could not run ffprobe: {exc}") from exc
-
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip().splitlines()
-        raise HTTPException(502, detail[-1] if detail else "ffprobe could not inspect the source stream")
-
-    payload = json.loads(result.stdout or "{}")
-    streams = payload.get("streams") or []
-
-    def normalize_track(stream: dict[str, Any]) -> dict[str, Any]:
-        tags = stream.get("tags") or {}
-        disposition = stream.get("disposition") or {}
-        codec_type = stream.get("codec_type") or "unknown"
-        language = tags.get("language") or "und"
-        title = tags.get("title") or tags.get("handler_name") or ""
-        label_parts = [f"#{stream.get('index', '?')}", language]
-        codec_name = stream.get("codec_name")
-        if codec_name:
-            label_parts.append(codec_name)
-        channels = stream.get("channels")
-        if codec_type == "audio" and channels:
-            label_parts.append(f"{channels}ch")
-        if title:
-            label_parts.append(title)
-        flags: list[str] = []
-        if disposition.get("default"):
-            flags.append("default")
-        if disposition.get("forced"):
-            flags.append("forced")
-        return {
-            "index": stream.get("index"),
-            "codec_type": codec_type,
-            "codec_name": codec_name,
-            "language": language,
-            "channels": channels,
-            "title": title,
-            "default": bool(disposition.get("default")),
-            "forced": bool(disposition.get("forced")),
-            "label": " | ".join(str(part) for part in label_parts if part),
-            "flags": flags,
-        }
-
-    audio_tracks = [normalize_track(stream) for stream in streams if stream.get("codec_type") == "audio"]
-    subtitle_tracks = [normalize_track(stream) for stream in streams if stream.get("codec_type") == "subtitle"]
-    video_tracks = [normalize_track(stream) for stream in streams if stream.get("codec_type") == "video"]
-    return {
-        "audio_tracks": audio_tracks,
-        "subtitle_tracks": subtitle_tracks,
-        "video_tracks": video_tracks,
-        "audio_count": len(audio_tracks),
-        "subtitle_count": len(subtitle_tracks),
-        "video_count": len(video_tracks),
-    }
-
-
-def cleanup_transcode_sessions(max_age_seconds: int = 7200) -> None:
-    cutoff = time.time() - max_age_seconds
-    TRANSCODE_ROOT.mkdir(parents=True, exist_ok=True)
-    stale_ids: list[str] = []
-    with TRANSCODE_LOCK:
-        for session_id, session in list(ACTIVE_TRANSCODES.items()):
-            process = session.get("process")
-            session_dir = Path(session["dir"])
-            session_type = session.get("session_type", "stream")
-            if process and process.poll() is None and session.get("started_at", 0) >= cutoff:
-                continue
-            stale_ids.append(session_id)
-            if process and process.poll() is None:
-                process.kill()
-            for extra in session.get("extra_processes", []):
-                extra_process = extra.get("process")
-                if extra_process and extra_process.poll() is None:
-                    extra_process.kill()
-                extra_log_handle = extra.get("log_handle")
-                if extra_log_handle:
-                    try:
-                        extra_log_handle.close()
-                    except OSError:
-                        pass
-            if session_type != "vod" and session_dir.exists():
-                shutil.rmtree(session_dir, ignore_errors=True)
-        for session_id in stale_ids:
-            ACTIVE_TRANSCODES.pop(session_id, None)
-
-    for path in TRANSCODE_ROOT.iterdir():
-        if not path.is_dir():
-            continue
-        if path.stat().st_mtime >= cutoff:
-            continue
-        shutil.rmtree(path, ignore_errors=True)
-
-
-def should_retry_vod_start(log_path: Path, output_path: Path, retry_count: int) -> bool:
-    if retry_count >= 2:
-        return False
-    if output_path.exists() and output_path.stat().st_size > 5 * 1024 * 1024:
-        return False
-    try:
-        log_text = log_path.read_text(encoding="utf-8", errors="ignore").lower()
-    except OSError:
-        return False
-    retry_markers = (
-        "error opening input files",
-        "temporary failure in name resolution",
-        "input/output error",
-        "server returned 5",
-        "connection reset by peer",
-    )
-    return any(marker in log_text for marker in retry_markers)
-
-
-def subtitle_codec_supported_for_webvtt(codec_name: str | None) -> bool:
-    return (codec_name or "").lower() in {"subrip", "srt", "webvtt", "ass", "ssa", "mov_text"}
-
-
-def subtitle_candidates_from_probe(probe: dict[str, Any]) -> list[dict[str, Any]]:
-    tracks: list[dict[str, Any]] = []
-    for track in probe.get("subtitle_tracks", []):
-        if not subtitle_codec_supported_for_webvtt(track.get("codec_name")):
-            continue
-        normalized = dict(track)
-        normalized["path"] = f"subtitle_{track['index']}.vtt"
-        normalized["url"] = normalized["path"]
-        tracks.append(normalized)
-    return tracks
-
-
-def start_vod_subtitle_extracts(
-    session_dir: Path, stream_url: str, subtitle_tracks: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
-    input_args: list[str] = []
-    if is_http_stream(stream_url):
-        input_args = [
-            "-reconnect",
-            "1",
-            "-reconnect_streamed",
-            "1",
-            "-reconnect_on_network_error",
-            "1",
-            "-reconnect_on_http_error",
-            "4xx,5xx",
-            "-reconnect_delay_max",
-            "2",
-        ]
-
-    started: list[dict[str, Any]] = []
-    for track in subtitle_tracks:
-        output_path = session_dir / track["path"]
-        log_path = session_dir / f"subtitle_{track['index']}.log"
-        log_handle = log_path.open("wb")
-        command = [
-            "ffmpeg",
-            "-hide_banner",
-            "-loglevel",
-            "warning",
-            "-y",
-            "-nostdin",
-            *input_args,
-            "-i",
-            stream_url,
-            "-map",
-            f"0:{track['index']}",
-            "-c:s",
-            "webvtt",
-            str(output_path),
-        ]
-        process = subprocess.Popen(
-            command,
-            stdout=log_handle,
-            stderr=subprocess.STDOUT,
-        )
-        started.append(
-            {
-                "process": process,
-                "log_handle": log_handle,
-                "log_path": str(log_path),
-                "track": track,
-                "output_path": str(output_path),
-            }
-        )
-    return started
-
-
-def available_vod_subtitle_tracks(session_dir: Path, subtitle_tracks: list[dict[str, Any]], item_id: str) -> list[dict[str, Any]]:
-    available: list[dict[str, Any]] = []
-    for track in subtitle_tracks:
-        path = session_dir / track["path"]
-        if not path.exists() or path.stat().st_size <= 0:
-            continue
-        available.append(
-            {
-                "index": track["index"],
-                "language": track.get("language") or "und",
-                "label": track.get("label") or f"Subtitle {track['index']}",
-                "default": bool(track.get("default")),
-                "forced": bool(track.get("forced")),
-                "url": f"/play/vod/{item_id}/{track['path']}",
-            }
-        )
-    return available
-
-
-def subtitle_track_urls(subtitle_tracks: list[dict[str, Any]], item_id: str) -> list[dict[str, Any]]:
-    return [
-        {
-            "index": track["index"],
-            "language": track.get("language") or "und",
-            "label": track.get("label") or f"Subtitle {track['index']}",
-            "default": bool(track.get("default")),
-            "forced": bool(track.get("forced")),
-            "url": f"/play/subtitle/{item_id}/{track['index']}.vtt",
-        }
-        for track in subtitle_tracks
-    ]
-
-
-def extract_subtitle_to_vtt(stream_url: str, stream_index: int, output_path: Path) -> None:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    if output_path.exists() and output_path.stat().st_size > 0:
-        return
-
-    input_args: list[str] = []
-    if is_http_stream(stream_url):
-        input_args = [
-            "-reconnect",
-            "1",
-            "-reconnect_streamed",
-            "1",
-            "-reconnect_on_network_error",
-            "1",
-            "-reconnect_on_http_error",
-            "4xx,5xx",
-            "-reconnect_delay_max",
-            "2",
-        ]
-
-    command = [
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel",
-        "warning",
-        "-y",
-        "-nostdin",
-        *input_args,
-        "-i",
-        stream_url,
-        "-map",
-        f"0:{stream_index}",
-        "-c:s",
-        "webvtt",
-        str(output_path),
-    ]
-    try:
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="ignore",
-            timeout=90,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise HTTPException(504, "Subtitle extraction timed out") from exc
-    except OSError as exc:
-        raise HTTPException(500, f"Could not run ffmpeg for subtitle extraction: {exc}") from exc
-
-    if result.returncode != 0 or not output_path.exists() or output_path.stat().st_size <= 0:
-        detail = (result.stderr or result.stdout or "").strip().splitlines()
-        raise HTTPException(502, detail[-1] if detail else "Subtitle extraction failed")
-
-
-def vod_playlist_ready(playlist_path: Path, minimum_segments: int = 2) -> bool:
-    if not playlist_path.exists() or playlist_path.stat().st_size <= 0:
-        return False
-    try:
-        playlist_text = playlist_path.read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return False
-    return playlist_text.count("#EXTINF:") >= minimum_segments
-
-
-def start_vod_process(session_dir: Path, stream_url: str) -> tuple[subprocess.Popen[bytes], Any, str]:
-    playlist_path = session_dir / "index.m3u8"
-    log_path = session_dir / "ffmpeg.log"
-    log_handle = log_path.open("wb")
-    input_args: list[str] = []
-    if is_http_stream(stream_url):
-        input_args = [
-            "-reconnect",
-            "1",
-            "-reconnect_streamed",
-            "1",
-            "-reconnect_on_network_error",
-            "1",
-            "-reconnect_on_http_error",
-            "4xx,5xx",
-            "-reconnect_delay_max",
-            "2",
-        ]
-    video_args, accel_label = ffmpeg_video_args(for_streaming=False)
-    command = [
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel",
-        "warning",
-        "-y",
-        "-nostdin",
-        *input_args,
-        "-i",
-        stream_url,
-        "-map",
-        "0:v:0",
-        "-map",
-        "0:a:0?",
-        "-sn",
-        *video_args,
-        "-c:a",
-        "aac",
-        "-b:a",
-        "160k",
-        "-ac",
-        "2",
-        "-f",
-        "hls",
-        "-hls_time",
-        "4",
-        "-hls_list_size",
-        "0",
-        "-hls_playlist_type",
-        "event",
-        "-hls_flags",
-        "append_list+independent_segments",
-        "-hls_segment_filename",
-        str(session_dir / "segment_%05d.ts"),
-        str(playlist_path),
-    ]
-    process = subprocess.Popen(
-        command,
-        stdout=log_handle,
-        stderr=subprocess.STDOUT,
-    )
-    return process, log_handle, accel_label
-
-
-def ensure_transcode_session(item_id: str, stream_url: str) -> dict[str, str]:
-    cleanup_transcode_sessions()
-    TRANSCODE_ROOT.mkdir(parents=True, exist_ok=True)
-    with TRANSCODE_LOCK:
-        for session_id, session in ACTIVE_TRANSCODES.items():
-            if session["item_id"] != item_id:
-                continue
-            process = session["process"]
-            playlist = Path(session["dir"]) / "index.m3u8"
-            if process.poll() is None and playlist.exists():
-                return {
-                    "session_id": session_id,
-                    "playlist_url": f"/play/session/{session_id}/index.m3u8",
-                    "accel_label": session.get("accel_label", "Unknown"),
-                }
-
-        session_id = uuid.uuid4().hex[:12]
-        session_dir = TRANSCODE_ROOT / session_id
-        session_dir.mkdir(parents=True, exist_ok=True)
-        playlist = session_dir / "index.m3u8"
-        log_path = session_dir / "ffmpeg.log"
-        log_handle = log_path.open("wb")
-        input_args: list[str] = []
-        if is_http_stream(stream_url):
-            input_args = [
-                "-reconnect",
-                "1",
-                "-reconnect_streamed",
-                "1",
-                "-reconnect_on_network_error",
-                "1",
-                "-reconnect_on_http_error",
-                "4xx,5xx",
-                "-reconnect_delay_max",
-                "2",
-            ]
-        video_args, accel_label = ffmpeg_video_args(for_streaming=True)
-        command = [
-            "ffmpeg",
-            "-hide_banner",
-            "-loglevel",
-            "warning",
-            "-y",
-            "-nostdin",
-            *input_args,
-            "-i",
-            stream_url,
-            "-map",
-            "0:v:0",
-            "-map",
-            "0:a:0?",
-            "-sn",
-            *video_args,
-            "-c:a",
-            "aac",
-            "-b:a",
-            "160k",
-            "-ac",
-            "2",
-            "-f",
-            "hls",
-            "-hls_time",
-            "4",
-            "-hls_list_size",
-            "0",
-            "-hls_playlist_type",
-            "event",
-            "-hls_flags",
-            "append_list+independent_segments",
-            "-hls_segment_filename",
-            str(session_dir / "segment_%03d.ts"),
-            str(playlist),
-        ]
-        process = subprocess.Popen(
-            command,
-            stdout=log_handle,
-            stderr=subprocess.STDOUT,
-        )
-        ACTIVE_TRANSCODES[session_id] = {
-            "item_id": item_id,
-            "dir": str(session_dir),
-            "process": process,
-            "started_at": time.time(),
-            "log_path": str(log_path),
-            "log_handle": log_handle,
-            "session_type": "stream",
-            "accel_label": accel_label,
-        }
-
-    deadline = time.time() + 20
-    while time.time() < deadline:
-        if playlist.exists() and playlist.stat().st_size > 0:
-            try:
-                playlist_text = playlist.read_text(encoding="utf-8", errors="ignore")
-            except OSError:
-                playlist_text = ""
-            if playlist_text.count("#EXTINF:") >= 3:
-                return {
-                    "session_id": session_id,
-                    "playlist_url": f"/play/session/{session_id}/index.m3u8",
-                    "accel_label": accel_label,
-                }
-        if process.poll() is not None:
-            break
-        time.sleep(0.5)
-
-    try:
-        log_text = log_path.read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        log_text = ""
-    detail = log_text.strip().splitlines()[-1] if log_text.strip() else "ffmpeg could not prepare the stream"
-    raise HTTPException(502, f"Browser transcoding failed: {detail}")
-
-
-def ensure_vod_session(item_id: str, stream_url: str) -> dict[str, Any]:
-    cleanup_transcode_sessions()
-    TRANSCODE_ROOT.mkdir(parents=True, exist_ok=True)
-    session_id = f"vod_{item_id}"
-    session_dir = TRANSCODE_ROOT / session_id
-    session_dir.mkdir(parents=True, exist_ok=True)
-    playlist_path = session_dir / "index.m3u8"
-    log_path = session_dir / "ffmpeg.log"
-    done_path = session_dir / ".complete"
-
-    with TRANSCODE_LOCK:
-        existing = ACTIVE_TRANSCODES.get(session_id)
-        if done_path.exists() and vod_playlist_ready(playlist_path, minimum_segments=1) and not existing:
-            return {
-                "session_id": session_id,
-                "status": "ready",
-                "playlist_url": f"/play/vod/{item_id}/index.m3u8",
-                "accel_label": "Unknown",
-            }
-        if existing:
-            process = existing["process"]
-            return_code = process.poll()
-            if return_code is None:
-                return {
-                    "session_id": session_id,
-                    "status": "processing",
-                    "playlist_url": f"/play/vod/{item_id}/index.m3u8",
-                    "accel_label": existing.get("accel_label", "Unknown"),
-                }
-            ACTIVE_TRANSCODES.pop(session_id, None)
-            log_handle = existing.get("log_handle")
-            if log_handle:
-                try:
-                    log_handle.close()
-                except OSError:
-                    pass
-            if return_code == 0 and vod_playlist_ready(playlist_path, minimum_segments=1):
-                done_path.write_text(now_iso(), encoding="utf-8")
-                return {
-                    "session_id": session_id,
-                    "status": "ready",
-                    "playlist_url": f"/play/vod/{item_id}/index.m3u8",
-                    "accel_label": existing.get("accel_label", "Unknown"),
-                }
-            retry_count = int(existing.get("retry_count", 0))
-            if should_retry_vod_start(log_path, playlist_path, retry_count):
-                done_path.unlink(missing_ok=True)
-                if playlist_path.exists():
-                    playlist_path.unlink(missing_ok=True)
-                for segment in session_dir.glob("segment_*.ts"):
-                    segment.unlink(missing_ok=True)
-                process, log_handle, accel_label = start_vod_process(session_dir, stream_url)
-                ACTIVE_TRANSCODES[session_id] = {
-                    "item_id": item_id,
-                    "dir": str(session_dir),
-                    "process": process,
-                    "started_at": time.time(),
-                    "log_path": str(log_path),
-                    "log_handle": log_handle,
-                    "session_type": "vod",
-                    "accel_label": accel_label,
-                    "retry_count": retry_count + 1,
-                }
-                return {
-                    "session_id": session_id,
-                    "status": "processing",
-                    "playlist_url": f"/play/vod/{item_id}/index.m3u8",
-                    "accel_label": accel_label,
-                }
-            done_path.unlink(missing_ok=True)
-            if playlist_path.exists():
-                playlist_path.unlink(missing_ok=True)
-            for segment in session_dir.glob("segment_*.ts"):
-                segment.unlink(missing_ok=True)
-            return {
-                "session_id": session_id,
-                "status": "failed",
-                "detail": "VOD build failed before the movie finished. The source stream was interrupted.",
-            }
-
-        if playlist_path.exists() and not done_path.exists():
-            playlist_path.unlink(missing_ok=True)
-        for segment in session_dir.glob("segment_*.ts"):
-            segment.unlink(missing_ok=True)
-        process, log_handle, accel_label = start_vod_process(session_dir, stream_url)
-        ACTIVE_TRANSCODES[session_id] = {
-            "item_id": item_id,
-            "dir": str(session_dir),
-            "process": process,
-            "started_at": time.time(),
-            "log_path": str(log_path),
-            "log_handle": log_handle,
-            "session_type": "vod",
-            "accel_label": accel_label,
-            "retry_count": 0,
-        }
-    return {
-        "session_id": session_id,
-        "status": "processing",
-        "playlist_url": f"/play/vod/{item_id}/index.m3u8",
-        "accel_label": accel_label,
-    }
-
-
-def vod_session_status(item_id: str) -> dict[str, Any]:
-    cleanup_transcode_sessions()
-    session_id = f"vod_{item_id}"
-    session_dir = TRANSCODE_ROOT / session_id
-    playlist_path = session_dir / "index.m3u8"
-    log_path = session_dir / "ffmpeg.log"
-    done_path = session_dir / ".complete"
-    playlist_url = f"/play/vod/{item_id}/index.m3u8"
-    segment_sizes = [segment.stat().st_size for segment in session_dir.glob("segment_*.ts") if segment.exists()]
-    result: dict[str, Any] = {
-        "session_id": session_id,
-        "playlist_url": playlist_url,
-        "playback_path": "Built HLS VOD",
-        "accel_label": "Unknown",
-        "exists": playlist_path.exists(),
-        "size_bytes": (playlist_path.stat().st_size if playlist_path.exists() else 0) + sum(segment_sizes),
-        "status": "missing",
-        "ffmpeg_active": False,
-        "stalled": False,
-    }
-    with TRANSCODE_LOCK:
-        existing = ACTIVE_TRANSCODES.get(session_id)
-        if existing:
-            process = existing["process"]
-            return_code = process.poll()
-            result["ffmpeg_active"] = return_code is None
-            result["started_at"] = existing.get("started_at")
-            result["accel_label"] = existing.get("accel_label", "Unknown")
-            if return_code is None:
-                result["status"] = "processing"
-            elif return_code == 0 and done_path.exists() and vod_playlist_ready(playlist_path, minimum_segments=1):
-                result["status"] = "ready"
-            else:
-                result["status"] = "failed"
-                result["detail"] = "VOD build failed before the movie finished."
-
-    if result["status"] == "missing":
-        if done_path.exists() and vod_playlist_ready(playlist_path, minimum_segments=1):
-            result["status"] = "ready"
-        elif vod_playlist_ready(playlist_path, minimum_segments=1):
-            result["status"] = "partial"
-        elif log_path.exists():
-            result["status"] = "failed"
-
-
-    if playlist_path.exists():
-        modified_at = max(
-            [playlist_path.stat().st_mtime]
-            + [segment.stat().st_mtime for segment in session_dir.glob("segment_*.ts") if segment.exists()]
-        )
-        result["updated_at"] = modified_at
-        result["stalled"] = result["status"] == "processing" and (time.time() - modified_at) > 120
-        result["can_play_while_building"] = vod_playlist_ready(playlist_path, minimum_segments=2)
-
-    if log_path.exists():
-        try:
-            lines = log_path.read_text(encoding="utf-8", errors="ignore").strip().splitlines()
-        except OSError:
-            lines = []
-        if lines:
-            result["last_log_line"] = lines[-1]
-            if result["status"] == "failed" and "detail" not in result:
-                result["detail"] = lines[-1]
-
-    return result
 
 
 def cooldown_before_retry(error_text: str) -> timedelta:
@@ -1375,7 +580,7 @@ def fetch_text(url: str, headers: dict[str, str] | None = None, timeout: int = 6
             elif encoding == "deflate":
                 import zlib
                 raw = zlib.decompress(raw)
-            print(f"M3U fetch: status={response.status}, bytes={len(raw)}, url={url}")
+            print(f"M3U fetch: status={response.status}, bytes={len(raw)}, url={mask_url(url)}")
             return raw.decode("utf-8-sig", errors="replace")
         except urllib.error.URLError as exc:
             last_error = exc
@@ -1395,6 +600,186 @@ def set_state(conn: sqlite3.Connection, key: str, value: Any) -> None:
 def get_state(conn: sqlite3.Connection, key: str, default: Any = None) -> Any:
     row = conn.execute("SELECT value FROM app_state WHERE key = ?", (key,)).fetchone()
     return json.loads(row["value"]) if row else default
+
+
+SOURCE_STATUS_KEY = "source_status"
+
+
+def mask_url(url: str) -> str:
+    """Redact credentials and query parameters for logs and status messages."""
+    try:
+        parsed = urllib.parse.urlsplit(url)
+    except ValueError:
+        return "<unparseable-url>"
+    host = parsed.hostname or ""
+    if parsed.port:
+        host = f"{host}:{parsed.port}"
+    return urllib.parse.urlunsplit((parsed.scheme, host, parsed.path or "", "", ""))
+
+
+def url_fingerprint(url: str) -> str:
+    return hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+
+
+def _resolve_m3u_url() -> str:
+    m3u_url = settings.effective_value("M3U_URL")
+    if not m3u_url:
+        config_path = APP_DIR / "config.json"
+        if config_path.exists():
+            try:
+                config = json.loads(config_path.read_text(encoding="utf-8"))
+                m3u_url = (config.get("m3u_url") or "").strip()
+            except (json.JSONDecodeError, OSError):
+                pass
+    return m3u_url
+
+
+def check_source(url: str, timeout: int = 30) -> dict[str, Any]:
+    """Fetch and validate the M3U source without touching the library."""
+    result: dict[str, Any] = {"state": "unknown", "checked_at": now_iso(), "entry_count": None, "detail": None}
+    try:
+        raw_text = fetch_text(url, None, timeout, True)
+    except urllib.error.HTTPError as exc:
+        result["state"] = "auth_failed" if exc.code in (401, 403) else "unreachable"
+        result["detail"] = f"HTTP {exc.code}"
+        return result
+    except Exception as exc:
+        result["state"] = "unreachable"
+        result["detail"] = type(exc).__name__
+        return result
+    parsed = parse_m3u(raw_text)
+    if parsed:
+        result["state"] = "ok"
+        result["entry_count"] = len(parsed)
+    elif "#EXTM3U" in raw_text[:4096].upper() or "#EXTINF" in raw_text:
+        result["state"] = "empty"
+    else:
+        result["state"] = "invalid"
+    return result
+
+
+def record_source_status(url: str, result: dict[str, Any]) -> None:
+    stored = dict(result)
+    stored["fingerprint"] = url_fingerprint(url)
+    with db() as conn:
+        set_state(conn, SOURCE_STATUS_KEY, stored)
+
+
+# ---------------------------------------------------------------------------
+# Movie version grouping: the same film often appears several times in a
+# source playlist (German / Multi-Subs / 4K). These helpers derive a stable
+# group key, a quality rank (for the representative card) and human-friendly
+# version tags, so the UI can show one card per title with a version picker.
+# ---------------------------------------------------------------------------
+
+_GROUP_BRACKETS = re.compile(r"\[[^\]]*\]")
+_GROUP_QUALITY_WORDS = re.compile(r"\b(4k|uhd|2160p|1080p|720p|fhd|hd)\b", re.IGNORECASE)
+_GROUP_LANG_WORDS = re.compile(
+    r"\b(german|deutsch|englisch|english|ger|eng|de|en|subbed|sub|dl)\b"
+    r"|multi[-\s]?(subs?|audio|lang)?\b|untertitel(t)?",
+    re.IGNORECASE,
+)
+
+
+def movie_group_key(source_title: str, metadata_title: str | None) -> str:
+    """Stable identity for one film: TMDB title if known, else the source
+    title with version markers ([DE], [Multi-Subs], 4K, year brackets, …)
+    stripped."""
+    if metadata_title and metadata_title.strip():
+        return "meta:" + re.sub(r"\s+", " ", metadata_title.strip().lower())
+    title = _GROUP_BRACKETS.sub(" ", source_title or "")
+    title = _GROUP_QUALITY_WORDS.sub(" ", title)
+    title = _GROUP_LANG_WORDS.sub(" ", title)
+    title = re.sub(r"[^a-z0-9]+", " ", title.lower())
+    return "src:" + title.strip()
+
+
+def movie_quality_rank(source_title: str) -> int:
+    text = source_title or ""
+    if re.search(r"\b(4k|uhd|2160p)\b", text, re.IGNORECASE):
+        return 3
+    if re.search(r"\b(1080p|fhd)\b", text, re.IGNORECASE):
+        return 2
+    if re.search(r"\b720p\b", text, re.IGNORECASE):
+        return 1
+    return 0
+
+
+_TAG_QUALITY = (
+    (re.compile(r"\b(4k|uhd|2160p)\b", re.IGNORECASE), "4K"),
+    (re.compile(r"\b(1080p|fhd)\b", re.IGNORECASE), "1080p"),
+    (re.compile(r"\b720p\b", re.IGNORECASE), "720p"),
+)
+_TAG_LANG = (
+    (re.compile(r"\b(german|deutsch|ger)\b|\[\s*de\s*\]", re.IGNORECASE), "DE"),
+    (re.compile(r"\b(english|englisch|eng)\b|\[\s*en\s*\]", re.IGNORECASE), "EN"),
+    (re.compile(r"multi\b|multi[-\s](subs?|audio|lang)|multi subtitles", re.IGNORECASE), "Multi"),
+)
+_TAG_SUBS = re.compile(r"\b(subbed|subs?|untertitel(t)?)\b", re.IGNORECASE)
+
+
+def version_tags(source_title: str, group_name: str) -> list[str]:
+    """Human-friendly version badges, e.g. ["4K", "Multi"] or ["DE"]."""
+    text = f"{source_title or ''} {group_name or ''}"
+    tags: list[str] = []
+    for rx, label in _TAG_QUALITY:
+        if rx.search(text):
+            tags.append(label)
+            break
+    for rx, label in _TAG_LANG:
+        if rx.search(text):
+            tags.append(label)
+    if "Multi" not in tags and _TAG_SUBS.search(text):
+        tags.append("Subs")
+    return tags
+
+
+_FLAG_DE = 1
+_FLAG_MULTI = 2
+_FLAG_EN = 4
+_FLAG_SUBS = 8
+_FLAG_4K = 16
+
+
+def version_flags(source_title: str, group_name: str) -> int:
+    """Bitmask of version attributes for fast SQL filtering:
+    DE=1, Multi=2, EN=4, Subs=8, 4K=16."""
+    text = f"{source_title or ''} {group_name or ''}"
+    flags = 0
+    if re.search(r"\b(4k|uhd|2160p)\b", text, re.IGNORECASE):
+        flags |= _FLAG_4K
+    if any(rx.search(text) for rx, label in _TAG_LANG if label == "DE"):
+        flags |= _FLAG_DE
+    if any(rx.search(text) for rx, label in _TAG_LANG if label == "EN"):
+        flags |= _FLAG_EN
+    if any(rx.search(text) for rx, label in _TAG_LANG if label == "Multi"):
+        flags |= _FLAG_MULTI
+    elif _TAG_SUBS.search(text):
+        flags |= _FLAG_SUBS
+    return flags
+
+
+def movie_has_tag(source_title: str, group_name: str, tag: str) -> int:
+    """1 if the version tags for this row contain ``tag`` (case-insensitive).
+
+    Registered as a SQLite function so language/quality filters can run
+    inside the query.
+    """
+    wanted = (tag or "").strip().lower()
+    if not wanted:
+        return 1
+    return 1 if any(t.lower() == wanted for t in version_tags(source_title, group_name)) else 0
+
+
+def read_source_status(url: str) -> dict[str, Any]:
+    """Latest check for the CURRENT url only; a new/changed URL starts as unknown."""
+    if not url:
+        return {"state": "not_configured", "checked_at": None, "entry_count": None, "detail": None}
+    with db() as conn:
+        stored = get_state(conn, SOURCE_STATUS_KEY)
+    if not isinstance(stored, dict) or stored.get("fingerprint") != url_fingerprint(url):
+        return {"state": "unknown", "checked_at": None, "entry_count": None, "detail": None}
+    return {key: stored.get(key) for key in ("state", "checked_at", "entry_count", "detail")}
 
 
 # ---------------------------------------------------------------------------
@@ -1474,7 +859,12 @@ async def admin_get_settings(
     reveal: bool = Query(default=False),
     _: dict[str, Any] = Depends(require_admin),
 ) -> dict[str, Any]:
-    """Return the effective settings. Values are masked unless ``reveal``."""
+    """Return the effective settings.
+
+    Secrets are never returned as ``value`` (``null`` unless revealed);
+    ``masked`` is display-only and must never be submitted back — the
+    settings form treats an empty field as "leave unchanged".
+    """
     session = session_from_request(request)
     csrf = session.get("csrf") if session else None
     keys: dict[str, Any] = {}
@@ -1483,7 +873,8 @@ async def admin_get_settings(
         is_secret = key != "METADATA_LANGUAGE"
         keys[key] = {
             "set": bool(value),
-            "value": value if (not is_secret or (reveal and value)) else _mask(value),
+            "value": value if (not is_secret or (reveal and value)) else None,
+            "masked": _mask(value),
         }
     return {"keys": keys, "csrf": csrf}
 
@@ -1494,7 +885,12 @@ async def admin_put_settings(
     body: dict[str, Any],
     _: dict[str, Any] = Depends(require_admin),
 ) -> dict[str, bool]:
-    """Apply settings updates. ``null`` or empty string removes a value.
+    """Apply settings updates.
+
+    Keys absent from the body or sent empty are left unchanged; only
+    non-empty values are written. To remove a value, pass its key in the
+    ``clear`` array. This prevents accidentally persisting display-only
+    masked placeholders (``h•••…n``) as real values.
 
     Updates land in ``DATA_DIR/.env`` (mode 0600) and the running process,
     so they take effect immediately; the systemd units pick them up at the
@@ -1502,12 +898,31 @@ async def admin_put_settings(
     """
     updates: dict[str, str | None] = {}
     for key in settings.UI_KEYS:
+        if key in (body.get("clear") or []):
+            updates[key] = None
+            continue
         if key not in body:
             continue
         raw = body.get(key)
         value = str(raw).strip() if raw is not None else ""
-        updates[key] = value if value else None
+        if not value:
+            continue
+        try:
+            value.encode("latin-1")
+        except UnicodeEncodeError:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"{key} contains characters that cannot be sent in HTTP headers",
+            )
+        updates[key] = value
+    old_m3u_url = settings.effective_value("M3U_URL")
     settings.apply_updates(updates)
+    new_m3u_url = updates.get("M3U_URL", old_m3u_url) or ""
+    if new_m3u_url != old_m3u_url:
+        # A new or cleared source must not inherit the previous source's result.
+        init_db()
+        with db() as conn:
+            conn.execute("DELETE FROM app_state WHERE key = ?", (SOURCE_STATUS_KEY,))
     return {"ok": True}
 
 
@@ -1536,6 +951,63 @@ async def admin_change_password(
     return {"ok": True}
 
 
+@app.get("/api/source-status")
+async def api_source_status() -> dict[str, Any]:
+    """Public: last known check result for the configured M3U source."""
+    init_db()
+    return read_source_status(_resolve_m3u_url())
+
+
+# ---------------------------------------------------------------------------
+# TMDB image proxy: posters are served same-origin so the browser never talks
+# to image.tmdb.org directly. This sidesteps client-side rate limiting,
+# DNS/ad blocking and hidden-tab throttling, and lets the server cache each
+# image once for all clients.
+# ---------------------------------------------------------------------------
+
+POSTER_PROXY_HOSTS = frozenset({"image.tmdb.org"})
+_POSTER_CACHE_MAX = 500
+_poster_cache: dict[str, tuple[bytes, str]] = {}
+
+
+def fetch_image_bytes(url: str, timeout: int = 15) -> tuple[bytes, str]:
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "image/*,*/*"})
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        content_type = response.headers.get("Content-Type", "image/jpeg").split(";")[0].strip() or "image/jpeg"
+        return response.read(), content_type
+
+
+@app.get("/api/poster")
+async def poster_proxy(u: str = Query(..., min_length=1)) -> Response:
+    """Proxy (and cache) an image.tmdb.org poster; all other hosts are rejected."""
+    parsed = urllib.parse.urlparse(u)
+    if parsed.scheme != "https" or parsed.hostname not in POSTER_PROXY_HOSTS:
+        raise HTTPException(400, "only https://image.tmdb.org/ images can be proxied")
+    cached = _poster_cache.get(u)
+    if cached is None:
+        try:
+            body, content_type = await asyncio.to_thread(fetch_image_bytes, u)
+        except Exception:
+            raise HTTPException(502, "upstream image fetch failed")
+        if len(_poster_cache) >= _POSTER_CACHE_MAX:
+            _poster_cache.pop(next(iter(_poster_cache)))
+        _poster_cache[u] = (body, content_type)
+        cached = (body, content_type)
+    return Response(content=cached[0], media_type=cached[1], headers={"Cache-Control": "public, max-age=86400"})
+
+
+@app.post("/api/admin/source-status/check")
+async def admin_check_source(_: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
+    """Admin: check the M3U source now without touching the library."""
+    init_db()
+    url = _resolve_m3u_url()
+    if not url:
+        raise HTTPException(400, "M3U_URL is not configured")
+    result = await asyncio.to_thread(check_source, url, 30)
+    record_source_status(url, result)
+    return read_source_status(url)
+
+
 @app.get("/settings", response_class=HTMLResponse)
 def settings_page() -> str:
     return SETTINGS_HTML
@@ -1543,12 +1015,12 @@ def settings_page() -> str:
 
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
-    return HTML
+    return LIBRARY_HTML
 
 
 @app.get("/series/{series_id}", response_class=HTMLResponse)
 def series_page(series_id: str) -> str:
-    return HTML
+    return LIBRARY_HTML
 
 
 @app.get("/api/items")
@@ -1561,9 +1033,16 @@ async def list_items(
     new_window: str = "refresh",
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    lang: str = "",
+    uhd: int = 0,
 ) -> dict[str, Any]:
     await async_init_db()
     async with read_db() as conn:
+        # Python-backed SQL helpers for movie version grouping (see below).
+        await conn.create_function("movie_group_key", 2, movie_group_key)
+        await conn.create_function("movie_quality_rank", 1, movie_quality_rank)
+        await conn.create_function("version_flags", 2, version_flags)
+        await conn.create_function("movie_has_tag", 3, movie_has_tag)
         last_refresh = await async_get_state(conn, "last_refresh")
         new_since = await async_new_since_for_window(conn, new_window)
         trending_ids = await async_trending_library_ids(conn)
@@ -1572,8 +1051,18 @@ async def list_items(
 
         # Unified view: one row per non-series item and one row per series group.
         # Series aggregates are pre-computed in series_groups for speed.
-        visible_items_cte = """
-        WITH visible_items AS (
+        # Movies carrying the same group key (same title in different language /
+        # quality variants) collapse into one card via the dedup window below.
+        #
+        # The grouping chain is materialised ONCE per request into TEMP tables:
+        # the Python-backed key/flag helpers are far too expensive to re-run for
+        # the ~10 count queries below (each would re-evaluate the whole CTE).
+        cte_params = [new_since, new_since]
+        await conn.execute("DROP TABLE IF EXISTS temp.temp_keyed_items")
+        await conn.execute("DROP TABLE IF EXISTS temp.temp_visible_items")
+        await conn.execute(f"""
+            CREATE TEMP TABLE temp_keyed_items AS
+            WITH base_items AS (
           SELECT
             items.id,
             COALESCE(metadata.title, items.title) AS title,
@@ -1611,7 +1100,7 @@ async def list_items(
             series_groups.latest_added_at AS added_at,
             '' AS last_seen_at,
             series_groups.is_favorite,
-            CASE WHEN series_groups.is_watched = 1 OR series_groups.watched_episode_count > 0 THEN 1 ELSE 0 END AS is_watched,
+            CASE WHEN series_groups.episode_count > 0 AND series_groups.watched_episode_count >= series_groups.episode_count THEN 1 ELSE 0 END AS is_watched,
             series_groups.watched_at,
             CASE WHEN series_groups.latest_added_at >= ? THEN 1 ELSE 0 END AS is_new,
             NULL AS metadata_title,
@@ -1624,14 +1113,40 @@ async def list_items(
             series_groups.watched_episode_count
           FROM series_groups
           WHERE series_groups.episode_count > 0
-        )
-        """
-        cte_params = [new_since, new_since]
+            )
+            SELECT
+              *,
+              CASE WHEN kind = 'movie'
+                THEN movie_group_key(source_title, metadata_title)
+                ELSE 'id:' || id
+              END AS movie_key,
+              movie_quality_rank(source_title) AS qrank,
+              version_flags(source_title, group_name) AS ver_flags
+            FROM base_items
+        """, cte_params)
+        await conn.execute("""
+            CREATE TEMP TABLE temp_visible_items AS
+            SELECT
+              *,
+              ROW_NUMBER() OVER (
+                PARTITION BY movie_key
+                ORDER BY qrank DESC,
+                         metadata_title IS NOT NULL DESC,
+                         added_at DESC, id
+              ) AS rn,
+              COUNT(*) OVER (PARTITION BY movie_key) AS version_count,
+              MAX(is_watched) OVER (PARTITION BY movie_key) AS group_is_watched,
+              MAX(is_favorite) OVER (PARTITION BY movie_key) AS group_is_favorite,
+              MAX(is_new) OVER (PARTITION BY movie_key) AS group_is_new
+            FROM temp_keyed_items
+        """)
+        await conn.execute("CREATE INDEX temp_idx_keyed_movie_key ON temp_keyed_items(movie_key)")
+        await conn.execute("CREATE INDEX temp_idx_visible_rn ON temp_visible_items(rn, movie_key)")
 
         async def _count_visible(where: str = "1 = 1", params: list[Any] | None = None) -> int:
             row = await (await conn.execute(
-                f"{visible_items_cte} SELECT COUNT(*) AS count FROM visible_items WHERE {where}",
-                [*cte_params, *(params or [])],
+                f"SELECT COUNT(*) AS count FROM temp_visible_items WHERE rn = 1 AND ({where})",
+                params or [],
             )).fetchone()
             return row["count"]
 
@@ -1656,11 +1171,10 @@ async def list_items(
             rows = upcoming_items[offset: offset + limit]
             groups = ["TMDB Upcoming"]
             kind_count_rows = await (await conn.execute(
-                f"{visible_items_cte} SELECT kind, COUNT(*) AS count FROM visible_items GROUP BY kind",
-                cte_params,
+                "SELECT kind, COUNT(*) AS count FROM temp_visible_items WHERE rn = 1 GROUP BY kind"
             )).fetchall()
             kind_counts = {row["kind"]: row["count"] for row in kind_count_rows}
-            new_count = await _count_visible("is_new = 1")
+            new_count = await _count_visible("group_is_new = 1")
             return {
                 "items": rows,
                 "total": total,
@@ -1673,9 +1187,9 @@ async def list_items(
                 "metadata_status": await async_metadata_warmup_status(conn),
                 "section_counts": {
                     "all": total,
-                    "favorites": await _count_visible("is_favorite = 1"),
-                    "watched": await _count_visible("is_watched = 1"),
-                    "lastWatched": await async_last_watched_count(conn),
+                    "favorites": await _count_visible("group_is_favorite = 1"),
+                    "watched": await _count_visible("group_is_watched = 1"),
+                    "continue": await _count_visible("kind = 'series' AND watched_episode_count > 0 AND watched_episode_count < episode_count"),
                     "new": new_count,
                     "trending": len(trending_ids["movie_ids"]),
                     "popular": len(popular_ids["movie_ids"]),
@@ -1687,57 +1201,80 @@ async def list_items(
         params: list[Any] = []
         if q:
             clauses.append(
-                "(visible_items.title LIKE ? OR visible_items.source_title LIKE ? OR visible_items.group_name LIKE ? OR visible_items.metadata_title LIKE ?)"
+                "EXISTS (SELECT 1 FROM temp_keyed_items k WHERE k.movie_key = temp_visible_items.movie_key"
+                " AND (k.title LIKE ? OR k.source_title LIKE ? OR k.group_name LIKE ? OR k.metadata_title LIKE ?))"
             )
             like = f"%{q}%"
             params.extend([like, like, like, like])
         if kind:
-            clauses.append("visible_items.kind = ?")
+            clauses.append("temp_visible_items.kind = ?")
             params.append(kind)
         if group:
-            clauses.append("visible_items.group_name = ?")
+            clauses.append(
+                "EXISTS (SELECT 1 FROM temp_keyed_items k WHERE k.movie_key = temp_visible_items.movie_key AND k.group_name = ?)"
+            )
             params.append(group)
+        if lang:
+            flag_bit = {"de": 1, "multi": 2, "en": 4}.get(lang.strip().lower())
+            if flag_bit is None:
+                raise HTTPException(400, "lang must be one of: de, multi, en")
+            clauses.append(
+                f"EXISTS (SELECT 1 FROM temp_keyed_items k WHERE k.movie_key = temp_visible_items.movie_key"
+                f" AND (k.ver_flags & {flag_bit}) != 0)"
+            )
+        if uhd:
+            clauses.append(
+                "EXISTS (SELECT 1 FROM temp_keyed_items k WHERE k.movie_key = temp_visible_items.movie_key"
+                " AND (k.ver_flags & 16) != 0)"
+            )
         if section == "favorites":
-            clauses.append("visible_items.is_favorite = 1")
+            clauses.append("temp_visible_items.group_is_favorite = 1")
         elif section == "watched":
-            clauses.append("visible_items.is_watched = 1")
+            clauses.append("temp_visible_items.group_is_watched = 1")
+        elif section == "continue":
+            clauses.append("temp_visible_items.kind = 'series' AND temp_visible_items.watched_episode_count > 0 AND temp_visible_items.watched_episode_count < temp_visible_items.episode_count")
         elif section == "new":
-            clauses.append("visible_items.is_new = 1")
+            clauses.append("temp_visible_items.group_is_new = 1")
         elif section == "trending":
-            clauses.append("visible_items.kind = 'movie'")
+            clauses.append("temp_visible_items.kind = 'movie'")
             if trending_ids["movie_ids"]:
                 placeholders = ",".join("?" for _ in trending_ids["movie_ids"])
-                clauses.append(f"visible_items.id IN ({placeholders})")
+                clauses.append(
+                    f"temp_visible_items.movie_key IN (SELECT movie_key FROM temp_keyed_items WHERE id IN ({placeholders}))"
+                )
                 params.extend(sorted(trending_ids["movie_ids"]))
             else:
                 clauses.append("1 = 0")
         elif section == "popular":
-            clauses.append("visible_items.kind = 'movie'")
+            clauses.append("temp_visible_items.kind = 'movie'")
             if popular_ids["movie_ids"]:
                 placeholders = ",".join("?" for _ in popular_ids["movie_ids"])
-                clauses.append(f"visible_items.id IN ({placeholders})")
+                clauses.append(
+                    f"temp_visible_items.movie_key IN (SELECT movie_key FROM temp_keyed_items WHERE id IN ({placeholders}))"
+                )
                 params.extend(sorted(popular_ids["movie_ids"]))
             else:
                 clauses.append("1 = 0")
         where = " AND ".join(clauses)
 
-        order_by = "visible_items.is_favorite DESC, visible_items.added_at DESC, visible_items.title COLLATE NOCASE"
+        order_by = "temp_visible_items.group_is_favorite DESC, temp_visible_items.added_at DESC, temp_visible_items.title COLLATE NOCASE"
         if sort == "title":
-            order_by = "visible_items.is_favorite DESC, visible_items.title COLLATE NOCASE"
+            order_by = "temp_visible_items.group_is_favorite DESC, temp_visible_items.title COLLATE NOCASE"
         elif sort == "rating":
-            order_by = "visible_items.is_favorite DESC, COALESCE(visible_items.rating, 0) DESC, visible_items.title COLLATE NOCASE"
+            order_by = "temp_visible_items.group_is_favorite DESC, COALESCE(temp_visible_items.rating, 0) DESC, temp_visible_items.title COLLATE NOCASE"
         elif sort == "release":
-            order_by = "visible_items.is_favorite DESC, COALESCE(visible_items.release_date, '') DESC, visible_items.title COLLATE NOCASE"
+            order_by = "temp_visible_items.group_is_favorite DESC, COALESCE(temp_visible_items.release_date, '') DESC, temp_visible_items.title COLLATE NOCASE"
         elif sort == "new":
-            order_by = "visible_items.is_new DESC, visible_items.added_at DESC, visible_items.title COLLATE NOCASE"
+            order_by = "temp_visible_items.group_is_new DESC, temp_visible_items.added_at DESC, temp_visible_items.title COLLATE NOCASE"
+        elif section == "continue":
+            order_by = "temp_visible_items.group_is_favorite DESC, COALESCE(temp_visible_items.watched_at, '') DESC, temp_visible_items.title COLLATE NOCASE"
         elif section == "watched" or sort == "watched":
-            order_by = "visible_items.is_favorite DESC, COALESCE(visible_items.watched_at, '') DESC, visible_items.title COLLATE NOCASE"
+            order_by = "temp_visible_items.group_is_favorite DESC, COALESCE(temp_visible_items.watched_at, '') DESC, temp_visible_items.title COLLATE NOCASE"
 
         total = await _count_visible()
         matched = await _count_visible(where, params)
         rows = await (await conn.execute(
             f"""
-            {visible_items_cte}
             SELECT
               id,
               title,
@@ -1748,10 +1285,10 @@ async def list_items(
               stream_url,
               added_at,
               last_seen_at,
-              is_favorite,
-              is_watched,
+              group_is_favorite AS is_favorite,
+              group_is_watched AS is_watched,
               watched_at,
-              is_new,
+              group_is_new AS is_new,
               metadata_title,
               release_date,
               rating,
@@ -1759,27 +1296,56 @@ async def list_items(
               poster_url,
               episode_count,
               season_count,
-              watched_episode_count
-            FROM visible_items
-            WHERE {where}
+              watched_episode_count,
+              movie_key,
+              version_count
+            FROM temp_visible_items
+            WHERE rn = 1 AND ({where})
             ORDER BY {order_by}
             LIMIT ? OFFSET ?
             """,
-            [*cte_params, *params, limit, offset],
+            [*params, limit, offset],
         )).fetchall()
+        items = [dict(row) for row in rows]
+
+        # Version lists for every movie on this page (id, title, group, tags,
+        # per-version watch/favorite state) power the badges and picker UI.
+        page_keys = [item["movie_key"] for item in items if item["kind"] == "movie"]
+        versions_map: dict[str, list[dict[str, Any]]] = {}
+        if page_keys:
+            key_placeholders = ",".join("?" for _ in page_keys)
+            version_rows = await (await conn.execute(
+                f"""
+                SELECT id, source_title, group_name, movie_key, is_watched, is_favorite
+                FROM temp_keyed_items
+                WHERE movie_key IN ({key_placeholders})
+                ORDER BY movie_quality_rank(source_title) DESC, source_title COLLATE NOCASE
+                """,
+                [*page_keys],
+            )).fetchall()
+            for vrow in version_rows:
+                versions_map.setdefault(vrow["movie_key"], []).append({
+                    "id": vrow["id"],
+                    "title": vrow["source_title"],
+                    "group_name": vrow["group_name"],
+                    "tags": version_tags(vrow["source_title"], vrow["group_name"]),
+                    "is_watched": vrow["is_watched"],
+                    "is_favorite": vrow["is_favorite"],
+                })
+        for item in items:
+            item["versions"] = versions_map.get(item["movie_key"], []) if item["kind"] == "movie" else []
+            item.pop("movie_key", None)
         group_rows = await (await conn.execute(
-            f"{visible_items_cte} SELECT DISTINCT group_name FROM visible_items WHERE group_name != 'Uncategorized' AND group_name != '' ORDER BY group_name",
-            cte_params,
+            "SELECT DISTINCT group_name FROM temp_visible_items WHERE rn = 1 AND group_name != 'Uncategorized' AND group_name != '' ORDER BY group_name",
         )).fetchall()
         groups = [row["group_name"] for row in group_rows]
         kind_count_rows = await (await conn.execute(
-            f"{visible_items_cte} SELECT kind, COUNT(*) AS count FROM visible_items GROUP BY kind",
-            cte_params,
+            "SELECT kind, COUNT(*) AS count FROM temp_visible_items WHERE rn = 1 GROUP BY kind",
         )).fetchall()
         kind_counts = {row["kind"]: row["count"] for row in kind_count_rows}
-        new_count = await _count_visible("is_new = 1")
+        new_count = await _count_visible("group_is_new = 1")
         return {
-            "items": [dict(row) for row in rows],
+            "items": items,
             "total": total,
             "matched": matched,
             "limit": limit,
@@ -1790,33 +1356,104 @@ async def list_items(
             "metadata_status": await async_metadata_warmup_status(conn),
             "section_counts": {
                 "all": total,
-                "favorites": await _count_visible("is_favorite = 1"),
-                "watched": await _count_visible("is_watched = 1"),
-                "lastWatched": await async_last_watched_count(conn),
+                "favorites": await _count_visible("group_is_favorite = 1"),
+                "watched": await _count_visible("group_is_watched = 1"),
+                "continue": await _count_visible("kind = 'series' AND watched_episode_count > 0 AND watched_episode_count < episode_count"),
                 "new": new_count,
-                "trending": len(trending_ids["movie_ids"]),
-                "popular": len(popular_ids["movie_ids"]),
+                "trending": await _count_visible(
+                    f"kind = 'movie' AND movie_key IN (SELECT movie_key FROM temp_keyed_items WHERE id IN ({','.join('?' for _ in sorted(trending_ids['movie_ids'])) or 'NULL'}))",
+                    sorted(trending_ids["movie_ids"]),
+                ) if trending_ids["movie_ids"] else 0,
+                "popular": await _count_visible(
+                    f"kind = 'movie' AND movie_key IN (SELECT movie_key FROM temp_keyed_items WHERE id IN ({','.join('?' for _ in sorted(popular_ids['movie_ids'])) or 'NULL'}))",
+                    sorted(popular_ids["movie_ids"]),
+                ) if popular_ids["movie_ids"] else 0,
                 "upcoming": len(upcoming_snapshot.get("items", [])),
             },
         }
 
 
+STATE_SNAPSHOT_VERSION = 1
+STATE_SNAPSHOT_KEEP = 30
+
+
+def state_snapshot_dir() -> Path:
+    return Path(DATA_DIR) / "state-snapshots"
+
+
+def write_state_snapshot() -> dict[str, Any]:
+    """Persist watched/favorite state to a JSON snapshot.
+
+    Runs after every successful refresh so a provider-side rename or a bad
+    migration can never silently wipe viewing state again. Timestamped file
+    plus a latest.json copy; older snapshots are pruned.
+    """
+    snap_dir = state_snapshot_dir()
+    snap_dir.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(DB_PATH), timeout=30.0)
+    conn.row_factory = sqlite3.Row
+    try:
+        items = {
+            row["id"]: {"w": row["is_watched"], "f": row["is_favorite"], "at": row["watched_at"]}
+            for row in conn.execute("SELECT id, is_watched, is_favorite, watched_at FROM items")
+        }
+        series = {
+            row["id"]: {"w": row["is_watched"], "f": row["is_favorite"], "at": row["watched_at"]}
+            for row in conn.execute("SELECT id, is_watched, is_favorite, watched_at FROM series_groups")
+        }
+    finally:
+        conn.close()
+    payload = {
+        "version": STATE_SNAPSHOT_VERSION,
+        "created_at": now_iso(),
+        "items": items,
+        "series_groups": series,
+    }
+    text = json.dumps(payload, separators=(",", ":"))
+    stamp = re.sub(r"[^0-9]", "", payload["created_at"])[:14]
+    (snap_dir / f"snapshot-{stamp}.json").write_text(text, encoding="utf-8")
+    (snap_dir / "latest.json").write_text(text, encoding="utf-8")
+    snapshots = sorted(snap_dir.glob("snapshot-*.json"), key=lambda p: p.name)
+    for old in snapshots[:-STATE_SNAPSHOT_KEEP]:
+        old.unlink(missing_ok=True)
+    return {"items": len(items), "series_groups": len(series)}
+
+
 @app.post("/api/refresh", dependencies=[Depends(require_api_key)])
 async def refresh() -> dict[str, Any]:
     await async_init_db()
-    m3u_url = settings.effective_value("M3U_URL")
-    if not m3u_url:
-        config_path = APP_DIR / "config.json"
-        if config_path.exists():
-            try:
-                config = json.loads(config_path.read_text(encoding="utf-8"))
-                m3u_url = (config.get("m3u_url") or "").strip()
-            except (json.JSONDecodeError, OSError):
-                pass
+    m3u_url = _resolve_m3u_url()
     if not m3u_url:
         raise HTTPException(400, "M3U_URL is missing in /var/lib/apps/m3u-library/.env and config.json")
-    raw_text = await asyncio.to_thread(fetch_text, m3u_url, None, 120, True)
+    try:
+        raw_text = await asyncio.to_thread(fetch_text, m3u_url, None, 120, True)
+    except urllib.error.HTTPError as exc:
+        state = "auth_failed" if exc.code in (401, 403) else "unreachable"
+        record_source_status(m3u_url, {"state": state, "checked_at": now_iso(), "entry_count": None, "detail": f"HTTP {exc.code}"})
+        raise HTTPException(502, f"M3U source request failed (HTTP {exc.code}); the existing library was left unchanged")
+    except Exception as exc:
+        record_source_status(m3u_url, {"state": "unreachable", "checked_at": now_iso(), "entry_count": None, "detail": type(exc).__name__})
+        raise HTTPException(502, f"M3U source is unreachable ({type(exc).__name__}); the existing library was left unchanged")
     parsed = await asyncio.to_thread(parse_m3u, raw_text)
+    if not parsed:
+        looks_like_m3u = "#EXTM3U" in raw_text[:4096].upper() or "#EXTINF" in raw_text
+        state = "empty" if looks_like_m3u else "invalid"
+        record_source_status(m3u_url, {"state": state, "checked_at": now_iso(), "entry_count": 0 if state == "empty" else None, "detail": None})
+        if state == "empty":
+            raise HTTPException(422, "M3U source returned a valid but empty playlist; the existing library was left unchanged")
+        raise HTTPException(422, "M3U source returned no valid M3U playlist; the existing library was left unchanged")
+    record_source_status(m3u_url, {"state": "ok", "checked_at": now_iso(), "entry_count": len(parsed), "detail": None})
+    # The provider playlist may list the same movie/episode twice (e.g. quality
+    # variants). Item ids are content-derived, so duplicates share one id and
+    # would violate the PRIMARY KEY on insert — keep the first occurrence.
+    deduped: list[dict[str, Any]] = []
+    _seen_ids: set[str] = set()
+    for item in parsed:
+        if item["id"] in _seen_ids:
+            continue
+        _seen_ids.add(item["id"])
+        deduped.append(item)
+    parsed = deduped
     print(f"M3U parse: #EXTINF={raw_text.count('#EXTINF')}, items={len(parsed)}")
     seen_ids = {item["id"] for item in parsed}
     timestamp = now_iso()
@@ -1926,6 +1563,11 @@ async def refresh() -> dict[str, Any]:
         return inserted, updated, removed
 
     added, updated, removed = await write_db(_apply_refresh)
+    try:
+        snapshot_info = await asyncio.to_thread(write_state_snapshot)
+        print(f"State snapshot written: {snapshot_info['items']} items, {snapshot_info['series_groups']} series groups")
+    except Exception as exc:
+        print(f"State snapshot failed (non-fatal): {exc}")
     run_metadata_warmup(last_refresh=timestamp)
     return {"ok": True, "added": added, "updated": updated, "removed": removed, "last_refresh": timestamp}
 
@@ -1938,9 +1580,12 @@ async def list_series(
     new_window: str = "refresh",
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    lang: str = "",
+    uhd: int = 0,
 ) -> dict[str, Any]:
     await async_init_db()
     async with read_db() as conn:
+        await conn.create_function("movie_has_tag", 3, movie_has_tag)
         last_refresh = await async_get_state(conn, "last_refresh")
         new_since = await async_new_since_for_window(conn, new_window)
         trending_ids = await async_trending_library_ids(conn)
@@ -1952,10 +1597,17 @@ async def list_series(
             clauses.append("(title LIKE ?)")
             like = f"%{q}%"
             params.append(like)
+        if lang:
+            clauses.append("movie_has_tag(title, group_name, ?) = 1")
+            params.append(lang)
+        if uhd:
+            clauses.append("movie_has_tag(title, group_name, '4K') = 1")
         if section == "favorites":
             clauses.append("is_favorite = 1")
         elif section == "watched":
-            clauses.append("(is_watched = 1 OR watched_episode_count > 0)")
+            clauses.append("episode_count > 0 AND watched_episode_count >= episode_count")
+        elif section == "continue":
+            clauses.append("watched_episode_count > 0 AND watched_episode_count < episode_count")
         elif section == "new":
             clauses.append("latest_added_at >= ?")
             params.append(new_since)
@@ -1983,6 +1635,8 @@ async def list_series(
             order_by = "COALESCE(release_date, '') DESC, title COLLATE NOCASE"
         elif sort == "new":
             order_by = "CASE WHEN latest_added_at >= ? THEN 1 ELSE 0 END DESC, latest_added_at DESC, title COLLATE NOCASE"
+        elif section == "continue":
+            order_by = "COALESCE(watched_at, '') DESC, title COLLATE NOCASE"
         elif section == "watched" or sort == "watched":
             order_by = "is_favorite DESC, COALESCE(watched_at, '') DESC, title COLLATE NOCASE"
 
@@ -1996,6 +1650,7 @@ async def list_series(
             f"""
             SELECT
               id,
+              'series' AS kind,
               title,
               release_date,
               rating,
@@ -2025,9 +1680,11 @@ async def list_series(
             )).fetchone())["count"],
             "favorites": (await (await conn.execute("SELECT COUNT(*) AS count FROM series_groups WHERE is_favorite = 1")).fetchone())["count"],
             "watched": (await (await conn.execute(
-                "SELECT COUNT(*) AS count FROM series_groups WHERE episode_count > 0 AND (is_watched = 1 OR watched_episode_count > 0)"
+                "SELECT COUNT(*) AS count FROM series_groups WHERE episode_count > 0 AND watched_episode_count >= episode_count"
             )).fetchone())["count"],
-            "lastWatched": 0,
+            "continue": (await (await conn.execute(
+                "SELECT COUNT(*) AS count FROM series_groups WHERE episode_count > 0 AND watched_episode_count > 0 AND watched_episode_count < episode_count"
+            )).fetchone())["count"],
             "trending": len(trending_ids["series_ids"]),
             "popular": len(popular_ids["series_ids"]),
             "upcoming": 0,
@@ -2075,106 +1732,6 @@ async def series_detail(
             season_label = f"Season {episode['season_number']}" if episode["season_number"] else "Episodes"
             seasons.setdefault(season_label, []).append(episode)
         return {"series": series_data, "seasons": seasons, "episode_count": len(episodes)}
-
-
-def _last_watched_rows(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    movie_rows = conn.execute(
-        """
-        SELECT
-          items.id,
-          COALESCE(metadata.title, items.title) AS title,
-          items.title AS source_title,
-          items.group_name,
-          items.kind,
-          items.logo,
-          items.stream_url,
-          items.added_at,
-          items.last_seen_at,
-          items.is_favorite,
-          items.is_watched,
-          0 AS is_new,
-          metadata.title AS metadata_title,
-          metadata.release_date,
-          metadata.rating,
-          metadata.description,
-          metadata.poster_url,
-          NULL AS episode_count,
-          NULL AS season_count,
-          items.watched_at
-        FROM items
-        LEFT JOIN metadata ON metadata.item_id = items.id
-        WHERE items.available = 1
-          AND items.kind != 'series'
-          AND items.is_watched = 1
-          AND items.watched_at IS NOT NULL
-        """
-    ).fetchall()
-    series_rows = conn.execute(
-        """
-        SELECT
-          series_groups.id,
-          series_groups.title,
-          series_groups.title AS source_title,
-          MAX(items.group_name) AS group_name,
-          'series' AS kind,
-          series_groups.poster_url AS logo,
-          '' AS stream_url,
-          MAX(items.added_at) AS added_at,
-          MAX(items.last_seen_at) AS last_seen_at,
-          series_groups.is_favorite,
-          1 AS is_watched,
-          0 AS is_new,
-          NULL AS metadata_title,
-          series_groups.release_date,
-          series_groups.rating,
-          series_groups.description,
-          series_groups.poster_url,
-          COUNT(items.id) AS episode_count,
-          COUNT(DISTINCT COALESCE(items.season_number, 0)) AS season_count,
-          series_groups.watched_at AS series_watched_at,
-          MAX(items.watched_at) AS max_episode_watched_at
-        FROM series_groups
-        JOIN items ON items.series_id = series_groups.id
-        WHERE items.available = 1
-          AND (series_groups.is_watched = 1 OR items.is_watched = 1)
-        GROUP BY series_groups.id
-        HAVING series_groups.watched_at IS NOT NULL OR MAX(items.watched_at) IS NOT NULL
-        """
-    ).fetchall()
-    items: list[dict[str, Any]] = []
-    for row in movie_rows:
-        item = dict(row)
-        item["is_external"] = False
-        items.append(item)
-    for row in series_rows:
-        item = dict(row)
-        item["watched_at"] = max(
-            (row["series_watched_at"] or ""),
-            (row["max_episode_watched_at"] or ""),
-        ) or None
-        item.pop("series_watched_at", None)
-        item.pop("max_episode_watched_at", None)
-        item["is_external"] = False
-        items.append(item)
-    items.sort(key=lambda item: item.get("watched_at") or "", reverse=True)
-    return items
-
-
-@app.get("/api/last-watched")
-async def list_last_watched(
-    limit: int = Query(20, ge=1, le=100),
-    offset: int = Query(0, ge=0),
-) -> dict[str, Any]:
-    await async_init_db()
-    async with read_db() as conn:
-        items = await async_last_watched_rows(conn)
-    total = len(items)
-    items = items[offset : offset + limit]
-    return {"items": items, "total": total, "matched": total, "limit": limit, "offset": offset}
-
-
-def last_watched_count(conn: sqlite3.Connection) -> int:
-    return len(_last_watched_rows(conn))
 
 
 def clean_metadata_query(title: str, kind: str) -> str:
@@ -2581,7 +2138,10 @@ async def async_get_trending_snapshot(conn: aiosqlite.Connection) -> dict[str, A
         return cache
     language = settings.effective_value("METADATA_LANGUAGE", "en-US")
     snapshot = await async_build_tmdb_library_snapshot("trending/movie/week", "trending/tv/week", language)
-    await async_set_state(conn, "tmdb_trending_week_cache", snapshot)
+    # Persist through the serialized writer: the read connection here never
+    # commits, so a direct async_set_state would be rolled back and every
+    # request would refetch TMDB (several seconds each).
+    await write_db(lambda c: async_set_state(c, "tmdb_trending_week_cache", snapshot))
     return snapshot
 
 
@@ -2591,7 +2151,7 @@ async def async_get_popular_snapshot(conn: aiosqlite.Connection) -> dict[str, An
         return cache
     language = settings.effective_value("METADATA_LANGUAGE", "en-US")
     snapshot = await async_build_tmdb_library_snapshot("movie/popular", "tv/popular", language)
-    await async_set_state(conn, "tmdb_popular_cache", snapshot)
+    await write_db(lambda c: async_set_state(c, "tmdb_popular_cache", snapshot))
     return snapshot
 
 
@@ -2628,7 +2188,7 @@ async def async_get_upcoming_snapshot(conn: aiosqlite.Connection) -> dict[str, A
             if result.get("id") and result.get("title")
         ],
     }
-    await async_set_state(conn, "tmdb_upcoming_cache", snapshot)
+    await write_db(lambda c: async_set_state(c, "tmdb_upcoming_cache", snapshot))
     return snapshot
 
 
@@ -2782,95 +2342,6 @@ async def async_ensure_series_group_metadata(conn: aiosqlite.Connection, series_
     )
     await async_clear_metadata_attempt(conn, "series", series_row["id"])
     return record
-
-
-async def async_last_watched_rows(conn: aiosqlite.Connection) -> list[dict[str, Any]]:
-    cursor = await conn.execute(
-        """
-        SELECT
-          items.id,
-          COALESCE(metadata.title, items.title) AS title,
-          items.title AS source_title,
-          items.group_name,
-          items.kind,
-          items.logo,
-          items.stream_url,
-          items.added_at,
-          items.last_seen_at,
-          items.is_favorite,
-          items.is_watched,
-          0 AS is_new,
-          metadata.title AS metadata_title,
-          metadata.release_date,
-          metadata.rating,
-          metadata.description,
-          metadata.poster_url,
-          NULL AS episode_count,
-          NULL AS season_count,
-          items.watched_at
-        FROM items
-        LEFT JOIN metadata ON metadata.item_id = items.id
-        WHERE items.available = 1
-          AND items.kind != 'series'
-          AND items.is_watched = 1
-          AND items.watched_at IS NOT NULL
-        """
-    )
-    movie_rows = await cursor.fetchall()
-    cursor = await conn.execute(
-        """
-        SELECT
-          series_groups.id,
-          series_groups.title,
-          series_groups.title AS source_title,
-          MAX(items.group_name) AS group_name,
-          'series' AS kind,
-          series_groups.poster_url AS logo,
-          '' AS stream_url,
-          MAX(items.added_at) AS added_at,
-          MAX(items.last_seen_at) AS last_seen_at,
-          series_groups.is_favorite,
-          1 AS is_watched,
-          0 AS is_new,
-          NULL AS metadata_title,
-          series_groups.release_date,
-          series_groups.rating,
-          series_groups.description,
-          series_groups.poster_url,
-          COUNT(items.id) AS episode_count,
-          COUNT(DISTINCT COALESCE(items.season_number, 0)) AS season_count,
-          series_groups.watched_at AS series_watched_at,
-          MAX(items.watched_at) AS max_episode_watched_at
-        FROM series_groups
-        JOIN items ON items.series_id = series_groups.id
-        WHERE items.available = 1
-          AND (series_groups.is_watched = 1 OR items.is_watched = 1)
-        GROUP BY series_groups.id
-        HAVING series_groups.watched_at IS NOT NULL OR MAX(items.watched_at) IS NOT NULL
-        """
-    )
-    series_rows = await cursor.fetchall()
-    items: list[dict[str, Any]] = []
-    for row in movie_rows:
-        item = dict(row)
-        item["is_external"] = False
-        items.append(item)
-    for row in series_rows:
-        item = dict(row)
-        item["watched_at"] = max(
-            (row["series_watched_at"] or ""),
-            (row["max_episode_watched_at"] or ""),
-        ) or None
-        item.pop("series_watched_at", None)
-        item.pop("max_episode_watched_at", None)
-        item["is_external"] = False
-        items.append(item)
-    items.sort(key=lambda item: item.get("watched_at") or "", reverse=True)
-    return items
-
-
-async def async_last_watched_count(conn: aiosqlite.Connection) -> int:
-    return len(await async_last_watched_rows(conn))
 
 
 async def async_count_warmup_series(conn: aiosqlite.Connection, last_refresh: str | None, now: str) -> int:
@@ -3233,6 +2704,78 @@ async def api_status() -> dict[str, Any]:
         }
 
 
+@app.get("/api/state/snapshots", dependencies=[Depends(require_api_key)])
+async def list_state_snapshots() -> dict[str, Any]:
+    """List available watched/favorite state snapshots."""
+    snap_dir = state_snapshot_dir()
+    snapshots = []
+    if snap_dir.is_dir():
+        for path in sorted(snap_dir.glob("snapshot-*.json"), key=lambda p: p.name, reverse=True):
+            snapshots.append({"file": path.name, "size": path.stat().st_size})
+    latest = snap_dir / "latest.json"
+    return {
+        "snapshots": snapshots,
+        "latest": latest.stat().st_size if latest.exists() else None,
+    }
+
+
+@app.post("/api/state/restore", dependencies=[Depends(require_api_key)])
+async def restore_state(file: str = "latest.json") -> dict[str, Any]:
+    """Restore watched/favorite state from a snapshot.
+
+    Only state columns are written; ids missing from the current library are
+    counted as missing. last_refresh is bumped so open tabs auto-reload.
+    """
+    await async_init_db()
+    file_name = Path(file).name
+    snap_path = state_snapshot_dir() / file_name
+    if not snap_path.exists():
+        raise HTTPException(404, f"State snapshot not found: {file_name}")
+    payload = json.loads(snap_path.read_text(encoding="utf-8"))
+    if payload.get("version") != STATE_SNAPSHOT_VERSION:
+        raise HTTPException(400, "Unsupported snapshot version")
+    items: dict[str, dict[str, Any]] = payload.get("items") or {}
+    series: dict[str, dict[str, Any]] = payload.get("series_groups") or {}
+
+    async def _apply(conn: aiosqlite.Connection) -> dict[str, Any]:
+        stats: dict[str, Any] = {
+            "items_updated": 0,
+            "items_missing": 0,
+            "series_updated": 0,
+            "series_missing": 0,
+        }
+        item_rows = [
+            (int(st.get("w") or 0), int(st.get("f") or 0), st.get("at"), item_id)
+            for item_id, st in items.items()
+        ]
+        CHUNK = 5000
+        for i in range(0, len(item_rows), CHUNK):
+            cursor = await conn.executemany(
+                "UPDATE items SET is_watched = ?, is_favorite = ?, watched_at = ? WHERE id = ?",
+                item_rows[i : i + CHUNK],
+            )
+            stats["items_updated"] += cursor.rowcount if cursor.rowcount is not None else 0
+        stats["items_missing"] = len(item_rows) - stats["items_updated"]
+        series_rows = [
+            (int(st.get("w") or 0), int(st.get("f") or 0), st.get("at"), gid)
+            for gid, st in series.items()
+        ]
+        cursor = await conn.executemany(
+            "UPDATE series_groups SET is_watched = ?, is_favorite = ?, watched_at = ? WHERE id = ?",
+            series_rows,
+        )
+        stats["series_updated"] = cursor.rowcount if cursor.rowcount is not None else 0
+        stats["series_missing"] = len(series_rows) - stats["series_updated"]
+        for gid in series:
+            await _async_update_series_group_stats(conn, gid)
+        await async_set_state(conn, "last_refresh", now_iso())
+        return stats
+
+    stats = await write_db(_apply)
+    stats["restored_from"] = file_name
+    return stats
+
+
 @app.post("/api/items/{item_id}/favorite")
 async def toggle_favorite(item_id: str) -> dict[str, Any]:
     async with read_db() as conn:
@@ -3383,2406 +2926,3 @@ def watch_playlist(id: str) -> Response:
             media_type="audio/x-mpegurl",
             headers={"Content-Disposition": f'attachment; filename="{filename}.m3u"'},
         )
-
-
-@app.get("/play/proxy/{id}")
-def proxy_playback(id: str, request: Request) -> Response:
-    init_db()
-    with db() as conn:
-        item = conn.execute("SELECT stream_url FROM items WHERE id = ?", (id,)).fetchone()
-        if not item:
-            raise HTTPException(404, "Item not found")
-        stream_url = item["stream_url"]
-    if not is_http_stream(stream_url):
-        raise HTTPException(400, "Proxy playback only supports HTTP/HTTPS sources")
-
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "*/*",
-        "Connection": "keep-alive",
-    }
-    range_header = request.headers.get("range")
-    if range_header:
-        headers["Range"] = range_header
-
-    upstream_request = urllib.request.Request(stream_url, headers=headers)
-    try:
-        upstream = urllib.request.urlopen(upstream_request, timeout=30)
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="ignore").strip() or str(exc)
-        raise HTTPException(exc.code, detail)
-    except urllib.error.URLError as exc:
-        raise HTTPException(502, f"Proxy playback failed: {exc.reason}")
-
-    response_headers: dict[str, str] = {
-        "Accept-Ranges": upstream.headers.get("Accept-Ranges", "bytes"),
-    }
-    for key in ("Content-Length", "Content-Range", "Content-Type", "Last-Modified", "ETag"):
-        value = upstream.headers.get(key)
-        if value:
-            response_headers[key] = value
-
-    media_type = upstream.headers.get_content_type() or "video/mp4"
-
-    def iterator():
-        try:
-            while True:
-                chunk = upstream.read(1024 * 256)
-                if not chunk:
-                    break
-                yield chunk
-        finally:
-            upstream.close()
-
-    return StreamingResponse(
-        iterator(),
-        status_code=upstream.getcode(),
-        media_type=media_type,
-        headers=response_headers,
-    )
-
-
-@app.post("/api/play/{id}/session")
-def create_browser_session(id: str) -> dict[str, Any]:
-    init_db()
-    with db() as conn:
-        item = conn.execute(
-            "SELECT id, title, stream_url, kind FROM items WHERE id = ?",
-            (id,),
-        ).fetchone()
-        if not item:
-            raise HTTPException(404, "Item not found")
-        if item["kind"] == "movie":
-            mode = browser_playback_mode(item["stream_url"])
-            if mode == "native":
-                return {
-                    "mode": "proxy-native",
-                    "status": "ready",
-                    "video_url": f"/play/proxy/{item['id']}",
-                    "playback_path": "Proxy MP4",
-                }
-            if not ffmpeg_available():
-                raise HTTPException(503, "ffmpeg is not installed on the server yet")
-            session = ensure_vod_session(item["id"], item["stream_url"])
-            return {"mode": "vod-hls", "playback_path": "Built HLS VOD", **session}
-        mode = browser_playback_mode(item["stream_url"])
-        if mode == "hls":
-            return {"mode": "hls-direct", "stream_url": item["stream_url"], "playback_path": "Direct HLS"}
-        if mode == "native":
-            return {"mode": "native", "stream_url": item["stream_url"], "playback_path": "Direct File"}
-        if not ffmpeg_available():
-            raise HTTPException(503, "ffmpeg is not installed on the server yet")
-        try:
-            session = ensure_transcode_session(item["id"], item["stream_url"])
-            return {"mode": "transcode-hls", "playback_path": "Transcoded HLS", **session}
-        except HTTPException as exc:
-            if exc.status_code != 502 or item["kind"] == "live":
-                raise
-            session = ensure_vod_session(item["id"], item["stream_url"])
-        return {"mode": "vod-hls", "playback_path": "Built HLS VOD", **session}
-
-
-@app.post("/api/play/{id}/vod-session")
-def create_vod_browser_session(id: str) -> dict[str, Any]:
-    init_db()
-    with db() as conn:
-        item = conn.execute(
-            "SELECT id, title, stream_url FROM items WHERE id = ?",
-            (id,),
-        ).fetchone()
-        if not item:
-            raise HTTPException(404, "Item not found")
-        mode = browser_playback_mode(item["stream_url"])
-        if mode == "native":
-            return {
-                "mode": "proxy-native",
-                "status": "ready",
-                "video_url": f"/play/proxy/{item['id']}",
-                "playback_path": "Proxy MP4",
-            }
-        if not ffmpeg_available():
-            raise HTTPException(503, "ffmpeg is not installed on the server yet")
-        session = ensure_vod_session(item["id"], item["stream_url"])
-        return {"mode": "vod-hls", "playback_path": "Built HLS VOD", **session}
-
-
-@app.get("/api/play/{id}/vod-status")
-def get_vod_browser_status(id: str) -> dict[str, Any]:
-    init_db()
-    with db() as conn:
-        item = conn.execute("SELECT id FROM items WHERE id = ?", (id,)).fetchone()
-        if not item:
-            raise HTTPException(404, "Item not found")
-    return vod_session_status(id)
-
-
-@app.get("/api/play/{id}/probe")
-def probe_playback_source(id: str) -> dict[str, Any]:
-    init_db()
-    with db() as conn:
-        item = conn.execute(
-            "SELECT id, title, stream_url FROM items WHERE id = ?",
-            (id,),
-        ).fetchone()
-        if not item:
-            raise HTTPException(404, "Item not found")
-    probe = probe_streams(item["stream_url"])
-    return {
-        "id": item["id"],
-        "title": item["title"],
-        **probe,
-    }
-
-
-@app.get("/play/session/{session_id}/{name:path}")
-def transcode_session_file(session_id: str, name: str) -> Response:
-    cleanup_transcode_sessions()
-    safe_name = Path(name).name
-    session_dir = TRANSCODE_ROOT / session_id
-    file_path = session_dir / safe_name
-    if not file_path.exists() or not file_path.is_file():
-        raise HTTPException(404, "Transcode file not ready")
-    media_type = None
-    if file_path.suffix == ".m3u8":
-        media_type = "application/vnd.apple.mpegurl"
-    elif file_path.suffix == ".ts":
-        media_type = "video/mp2t"
-    return FileResponse(file_path, media_type=media_type)
-
-
-@app.get("/play/vod/{item_id}/{name:path}")
-def vod_session_file(item_id: str, name: str) -> Response:
-    cleanup_transcode_sessions()
-    safe_name = Path(name).name
-    session_dir = TRANSCODE_ROOT / f"vod_{item_id}"
-    file_path = session_dir / safe_name
-    if not file_path.exists() or not file_path.is_file():
-        raise HTTPException(404, "VOD file not ready")
-    media_type = None
-    if file_path.suffix == ".m3u8":
-        media_type = "application/vnd.apple.mpegurl"
-    elif file_path.suffix == ".ts":
-        media_type = "video/mp2t"
-    elif file_path.suffix == ".vtt":
-        media_type = "text/vtt"
-    return FileResponse(file_path, media_type=media_type)
-
-
-@app.get("/play/subtitle/{item_id}/{stream_index}.vtt")
-def vod_subtitle_file(item_id: str, stream_index: int) -> Response:
-    init_db()
-    with db() as conn:
-        item = conn.execute(
-            "SELECT id, stream_url FROM items WHERE id = ?",
-            (item_id,),
-        ).fetchone()
-        if not item:
-            raise HTTPException(404, "Item not found")
-    probe = probe_streams(item["stream_url"])
-    track = next((track for track in subtitle_candidates_from_probe(probe) if int(track["index"]) == stream_index), None)
-    if not track:
-        raise HTTPException(404, "Subtitle track not found or not supported for browser playback")
-    session_dir = TRANSCODE_ROOT / f"vod_{item_id}"
-    output_path = session_dir / f"subtitle_{stream_index}.vtt"
-    extract_subtitle_to_vtt(item["stream_url"], stream_index, output_path)
-    return FileResponse(output_path, media_type="text/vtt")
-
-
-@app.get("/play/{id}", response_class=HTMLResponse)
-def browser_player(id: str) -> str:
-    init_db()
-    with db() as conn:
-        item = conn.execute(
-            "SELECT id, title, stream_url, kind, series_id FROM items WHERE id = ?",
-            (id,),
-        ).fetchone()
-        if not item:
-            raise HTTPException(404, "Item not found")
-        title = html_lib.escape(item["title"])
-        stream_url = item["stream_url"]
-        back_href = f"/series/{urllib.parse.quote(item['series_id'])}" if item["series_id"] else "/"
-        return f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{title} | Browser Player</title>
-  <style>
-    :root {{
-      --bg: #111318;
-      --panel: #191d24;
-      --panel-2: #242b35;
-      --text: #f6f7fb;
-      --muted: #aab3c2;
-      --accent: #ffb84d;
-      --accent-2: #72d6a1;
-      --border: rgba(255,255,255,0.08);
-    }}
-    * {{ box-sizing: border-box; }}
-    body {{
-      margin: 0;
-      font-family: Inter, "Segoe UI", system-ui, sans-serif;
-      background: linear-gradient(180deg, #0f1217 0%, #151922 100%);
-      color: var(--text);
-    }}
-    .page {{
-      max-width: 1280px;
-      margin: 0 auto;
-      padding: 24px;
-    }}
-    .topbar {{
-      display: flex;
-      flex-wrap: wrap;
-      gap: 12px;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 18px;
-    }}
-    .title-wrap h1 {{
-      margin: 0;
-      font-size: 1.6rem;
-      line-height: 1.2;
-    }}
-    .subtitle {{
-      color: var(--muted);
-      margin-top: 6px;
-      font-size: 0.95rem;
-    }}
-    .actions {{
-      display: flex;
-      gap: 10px;
-      flex-wrap: wrap;
-    }}
-    .button, button, select {{
-      border-radius: 8px;
-      border: 1px solid var(--border);
-      background: var(--panel-2);
-      color: var(--text);
-      padding: 10px 14px;
-      font: inherit;
-    }}
-    .button {{
-      text-decoration: none;
-      display: inline-flex;
-      align-items: center;
-    }}
-    .button.primary {{
-      background: var(--accent);
-      color: #1c1300;
-      border-color: transparent;
-      font-weight: 700;
-    }}
-    .button.active-mode {{
-      background: var(--accent-2);
-      color: #10261a;
-      border-color: transparent;
-      font-weight: 700;
-    }}
-    .layout {{
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) 320px;
-      gap: 18px;
-    }}
-    .player-shell, .sidebar {{
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-    }}
-    .player-shell {{
-      padding: 18px;
-    }}
-    video {{
-      width: 100%;
-      background: #000;
-      border-radius: 8px;
-      aspect-ratio: 16 / 9;
-    }}
-    .sidebar {{
-      padding: 16px;
-      display: flex;
-      flex-direction: column;
-      gap: 14px;
-    }}
-    .field {{
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }}
-    .field label {{
-      color: var(--muted);
-      font-size: 0.88rem;
-    }}
-    .status {{
-      min-height: 44px;
-      color: var(--muted);
-      line-height: 1.45;
-    }}
-    .hint {{
-      padding: 12px;
-      border-radius: 8px;
-      background: rgba(114, 214, 161, 0.08);
-      border: 1px solid rgba(114, 214, 161, 0.18);
-      color: #dcefe5;
-      font-size: 0.92rem;
-      line-height: 1.45;
-    }}
-    code {{
-      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-      font-size: 0.9em;
-    }}
-    @media (max-width: 980px) {{
-      .layout {{
-        grid-template-columns: 1fr;
-      }}
-      .page {{
-        padding: 16px;
-      }}
-    }}
-  </style>
-</head>
-<body>
-  <div class="page">
-    <div class="topbar">
-      <div class="title-wrap">
-        <h1>{title}</h1>
-        <div class="subtitle">Browser playback test with HLS audio and subtitle track support when the stream exposes them.</div>
-      </div>
-      <div class="actions">
-        <a class="button" href="{html_lib.escape(back_href)}">Back</a>
-        <a class="button primary" href="/watch/{urllib.parse.quote(item['id'])}.m3u">Open in PotPlayer</a>
-      </div>
-    </div>
-    <div class="layout">
-      <section class="player-shell">
-        <video id="video" controls playsinline preload="metadata"></video>
-      </section>
-      <aside class="sidebar">
-        <div class="field">
-          <label>Playback</label>
-          <div class="actions">
-            <button id="mode-vod" type="button" class="button active-mode">VOD</button>
-          </div>
-        </div>
-        <div class="field">
-          <label>Playback path</label>
-          <div class="status" id="playback-path">Detecting...</div>
-        </div>
-        <div class="field">
-          <label for="audio-track">Audio language</label>
-          <select id="audio-track" disabled>
-            <option>No alternate audio detected</option>
-          </select>
-        </div>
-        <div class="field">
-          <label for="subtitle-track">Subtitles</label>
-          <select id="subtitle-track" disabled>
-            <option>No subtitles detected</option>
-          </select>
-        </div>
-        <div class="field">
-          <label>Status</label>
-          <div class="status" id="status">Preparing player...</div>
-        </div>
-        <div class="field">
-          <label>Detected source tracks</label>
-          <div class="status" id="probe-status">Inspecting source streams...</div>
-        </div>
-        <div class="hint">
-          If this stream does not start, the usual reasons are unsupported codecs, missing CORS headers, or a source that needs remuxing/transcoding before browsers can handle it.
-        </div>
-      </aside>
-    </div>
-  </div>
-  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
-  <script>
-    const itemId = {json.dumps(item["id"])};
-    const title = {json.dumps(item["title"])};
-    const itemKind = {json.dumps(item["kind"])};
-    const video = document.getElementById("video");
-    const statusEl = document.getElementById("status");
-    const probeStatusEl = document.getElementById("probe-status");
-    const playbackPathEl = document.getElementById("playback-path");
-    const vodModeButton = document.getElementById("mode-vod");
-    const audioSelect = document.getElementById("audio-track");
-    const subtitleSelect = document.getElementById("subtitle-track");
-    let hls = null;
-    let vodPollTimer = null;
-    let vodAttached = false;
-    let manualSubtitleTracks = [];
-    let currentPlaybackPath = "Unknown";
-
-    function setStatus(message) {{
-      statusEl.textContent = message;
-    }}
-
-    function setPlaybackPath(message) {{
-      currentPlaybackPath = message;
-      playbackPathEl.textContent = message;
-    }}
-
-    function setProbeStatus(message) {{
-      probeStatusEl.textContent = message;
-    }}
-
-    function playbackPathLabel(base, accel) {{
-      if (!accel || accel === "Unknown") return base;
-      return `${{base}} · ${{accel}}`;
-    }}
-
-    function formatBytes(bytes) {{
-      if (!bytes) return "0 B";
-      const units = ["B", "KB", "MB", "GB"];
-      let value = bytes;
-      let index = 0;
-      while (value >= 1024 && index < units.length - 1) {{
-        value /= 1024;
-        index += 1;
-      }}
-      return `${{value.toFixed(index === 0 ? 0 : 1)}} ${{units[index]}}`;
-    }}
-
-    function formatDetectedTrack(track) {{
-      const parts = [track.label];
-      if (track.flags && track.flags.length) {{
-        parts.push(`(${{track.flags.join(", ")}})`);
-      }}
-      return parts.join(" ");
-    }}
-
-    async function loadProbe() {{
-      setProbeStatus("Inspecting source streams...");
-      const res = await fetch(`/api/play/${{encodeURIComponent(itemId)}}/probe`, {{
-        cache: "no-store"
-      }});
-      const data = await res.json();
-      if (!res.ok) {{
-        setProbeStatus(data.detail || "Could not inspect source tracks.");
-        return;
-      }}
-      const lines = [];
-      if (data.audio_tracks?.length) {{
-        lines.push(`Audio: ${{data.audio_tracks.map(formatDetectedTrack).join(" ; ")}}`);
-      }} else {{
-        lines.push("Audio: none detected");
-      }}
-      if (data.subtitle_tracks?.length) {{
-        lines.push(`Subtitles: ${{data.subtitle_tracks.map(formatDetectedTrack).join(" ; ")}}`);
-        applyManualSubtitleTracks(data.subtitle_tracks.map(track => ({{
-          index: track.index,
-          language: track.language,
-          label: track.label,
-          default: !!track.default,
-          forced: !!track.forced,
-          url: `/play/subtitle/${{encodeURIComponent(itemId)}}/${{track.index}}.vtt`
-        }})));
-      }} else {{
-        lines.push("Subtitles: none detected");
-      }}
-      setProbeStatus(lines.join(" | "));
-    }}
-
-    function setMode(mode) {{
-      vodModeButton.classList.toggle("active-mode", mode === "vod");
-    }}
-
-    function stopVodPolling() {{
-      if (vodPollTimer) {{
-        clearTimeout(vodPollTimer);
-        vodPollTimer = null;
-      }}
-    }}
-
-    function resetPlayer() {{
-      stopVodPolling();
-      vodAttached = false;
-      manualSubtitleTracks = [];
-      if (hls) {{
-        hls.destroy();
-        hls = null;
-      }}
-      video.pause();
-      video.removeAttribute("src");
-      video.load();
-      setPlaybackPath("Detecting...");
-      audioSelect.disabled = true;
-      subtitleSelect.disabled = true;
-      audioSelect.innerHTML = "<option>No alternate audio detected</option>";
-      subtitleSelect.innerHTML = "<option>No subtitles detected</option>";
-      for (const trackEl of Array.from(video.querySelectorAll("track[data-manual-subtitle='1']"))) {{
-        trackEl.remove();
-      }}
-    }}
-
-    function fillSelect(select, options, disabledLabel) {{
-      select.innerHTML = "";
-      if (!options.length) {{
-        select.disabled = true;
-        const option = document.createElement("option");
-        option.textContent = disabledLabel;
-        select.appendChild(option);
-        return;
-      }}
-      select.disabled = false;
-      for (const entry of options) {{
-        const option = document.createElement("option");
-        option.value = String(entry.value);
-        option.textContent = entry.label;
-        if (entry.selected) option.selected = true;
-        select.appendChild(option);
-      }}
-    }}
-
-    function updateAudioTracks() {{
-      if (!hls) return;
-      const tracks = (hls.audioTracks || []).map((track, index) => {{
-        const parts = [track.name || `Track ${{index + 1}}`];
-        if (track.lang) parts.push(track.lang);
-        return {{
-          value: index,
-          label: parts.join(" | "),
-          selected: hls.audioTrack === index
-        }};
-      }});
-      fillSelect(audioSelect, tracks, "No alternate audio detected");
-    }}
-
-    function updateSubtitleTracks() {{
-      if (!hls) return;
-      const tracks = [{{
-        value: -1,
-        label: "Off",
-        selected: hls.subtitleTrack === -1
-      }}];
-      for (const [index, track] of (hls.subtitleTracks || []).entries()) {{
-        const parts = [track.name || `Subtitle ${{index + 1}}`];
-        if (track.lang) parts.push(track.lang);
-        tracks.push({{
-          value: index,
-          label: parts.join(" | "),
-          selected: hls.subtitleTrack === index
-        }});
-      }}
-      if (tracks.length > 1) {{
-        fillSelect(subtitleSelect, tracks, "No subtitles detected");
-        return;
-      }}
-      if (manualSubtitleTracks.length) {{
-        const manualOptions = [{{
-          value: -1,
-          label: "Off",
-          selected: !Array.from(video.textTracks || []).some(track => track.mode === "showing")
-        }}, ...manualSubtitleTracks.map((track, index) => ({{
-          value: index,
-          label: track.label,
-          selected: Array.from(video.textTracks || [])[index]?.mode === "showing"
-        }}))];
-        fillSelect(subtitleSelect, manualOptions, "No subtitles detected");
-        return;
-      }}
-      fillSelect(subtitleSelect, [], "No subtitles detected");
-    }}
-
-    audioSelect.addEventListener("change", () => {{
-      if (hls) {{
-        hls.audioTrack = Number(audioSelect.value);
-        return;
-      }}
-      const nativeTracks = video.audioTracks;
-      if (!nativeTracks) return;
-      const selected = Number(audioSelect.value);
-      for (let i = 0; i < nativeTracks.length; i += 1) {{
-        nativeTracks[i].enabled = i === selected;
-      }}
-    }});
-
-    subtitleSelect.addEventListener("change", () => {{
-      if (hls && (hls.subtitleTracks || []).length) {{
-        hls.subtitleTrack = Number(subtitleSelect.value);
-        return;
-      }}
-      const selected = Number(subtitleSelect.value);
-      const nativeTracks = Array.from(video.textTracks || []);
-      for (const [index, track] of nativeTracks.entries()) {{
-        if (selected === -1) {{
-          track.mode = "disabled";
-        }} else {{
-          track.mode = index === selected ? "showing" : "disabled";
-        }}
-      }}
-    }});
-
-    function updateNativeTracks() {{
-      const audioTracks = video.audioTracks ? Array.from(video.audioTracks) : [];
-      const audioOptions = audioTracks.map((track, index) => {{
-        const label = track.label || track.language || `Audio ${{index + 1}}`;
-        return {{
-          value: index,
-          label,
-          selected: !!track.enabled
-        }};
-      }});
-      fillSelect(audioSelect, audioOptions, audioTracks.length ? "No alternate audio detected" : "Browser does not expose audio tracks");
-
-      const textTracks = Array.from(video.textTracks || []).filter(track => !track.kind || ["subtitles", "captions"].includes(track.kind));
-      const subtitleOptions = textTracks.length
-        ? [{{
-            value: -1,
-            label: "Off",
-            selected: !textTracks.some(track => track.mode === "showing")
-          }}, ...textTracks.map((track, index) => ({{
-            value: index,
-            label: track.label || track.language || `Subtitle ${{index + 1}}`,
-            selected: track.mode === "showing"
-          }}))]
-        : [];
-      fillSelect(subtitleSelect, subtitleOptions, textTracks.length ? "No subtitles detected" : "Browser does not expose subtitle tracks");
-    }}
-
-    function applyManualSubtitleTracks(tracks) {{
-      manualSubtitleTracks = tracks || [];
-      for (const trackEl of Array.from(video.querySelectorAll("track[data-manual-subtitle='1']"))) {{
-        trackEl.remove();
-      }}
-      for (const [index, track] of manualSubtitleTracks.entries()) {{
-        const element = document.createElement("track");
-        element.kind = "subtitles";
-        element.label = track.label || `Subtitle ${{index + 1}}`;
-        element.srclang = track.language || "und";
-        element.src = track.url;
-        element.default = !!track.default && index === 0;
-        element.dataset.manualSubtitle = "1";
-        video.appendChild(element);
-      }}
-      setTimeout(() => {{
-        updateNativeTracks();
-        updateSubtitleTracks();
-      }}, 0);
-    }}
-
-    function attachNative(streamUrl, playbackPath = "Native") {{
-      setPlaybackPath(playbackPath);
-      setStatus("Using your browser's native player. Track switching depends on what the browser exposes.");
-      video.src = streamUrl;
-      video.addEventListener("loadedmetadata", () => {{
-        updateNativeTracks();
-        setStatus("Playback ready.");
-      }}, {{ once: true }});
-      video.addEventListener("error", () => setStatus("Native playback failed. The stream may need HLS support, CORS permission, or transcoding."));
-    }}
-
-    function attachHls(streamUrl, transcoded, playbackPath = "HLS") {{
-      setPlaybackPath(playbackPath);
-      hls = new Hls({{
-        enableWorker: true,
-        renderTextTracksNatively: false
-      }});
-      hls.loadSource(streamUrl);
-      hls.attachMedia(video);
-      hls.on(Hls.Events.MANIFEST_PARSED, (_, data) => {{
-        updateAudioTracks();
-        updateSubtitleTracks();
-        setStatus(`Manifest loaded. ${{data.levels?.length || 0}} quality level(s) detected.`);
-      }});
-      hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, updateAudioTracks);
-      hls.on(Hls.Events.AUDIO_TRACK_SWITCHED, updateAudioTracks);
-      hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, updateSubtitleTracks);
-      hls.on(Hls.Events.SUBTITLE_TRACK_SWITCH, updateSubtitleTracks);
-      hls.on(Hls.Events.ERROR, (_, data) => {{
-        const fatal = data?.fatal ? " Fatal." : "";
-        setStatus(`Playback error.${{fatal}} ${{data?.details || "Unknown player error"}}`);
-      }});
-      video.addEventListener("loadedmetadata", () => setStatus(transcoded ? "Playback ready. Server transcoding is active." : "Playback ready."), {{ once: true }});
-    }}
-
-    async function bootstrapVod() {{
-      resetPlayer();
-      setMode("vod");
-      setStatus("Preparing VOD file. This can take a while for full-length items...");
-      const res = await fetch(`/api/play/${{encodeURIComponent(itemId)}}/vod-session`, {{
-        method: "POST",
-        cache: "no-store"
-      }});
-      const data = await res.json();
-      if (!res.ok) {{
-        setStatus(data.detail || "Could not prepare VOD playback.");
-        return;
-      }}
-      setPlaybackPath(playbackPathLabel(data.playback_path || "VOD", data.accel_label));
-      if (Array.isArray(data.subtitle_tracks) && data.subtitle_tracks.length) {{
-        applyManualSubtitleTracks(data.subtitle_tracks);
-      }}
-      if (data.status === "ready") {{
-        vodAttached = true;
-        attachHls(data.playlist_url, false, playbackPathLabel(data.playback_path || "VOD", data.accel_label));
-        setStatus("VOD ready.");
-        return;
-      }}
-      await pollVodStatus();
-    }}
-
-    async function pollVodStatus() {{
-      const res = await fetch(`/api/play/${{encodeURIComponent(itemId)}}/vod-status`, {{
-        cache: "no-store"
-      }});
-      const data = await res.json();
-      if (!res.ok) {{
-        setStatus(data.detail || "Could not load VOD status.");
-        return;
-      }}
-      setPlaybackPath(playbackPathLabel(data.playback_path || "VOD", data.accel_label));
-      if (Array.isArray(data.subtitle_tracks) && data.subtitle_tracks.length) {{
-        applyManualSubtitleTracks(data.subtitle_tracks);
-      }}
-      if (data.status === "ready") {{
-        vodAttached = true;
-        attachHls(data.playlist_url, false, playbackPathLabel(data.playback_path || "VOD", data.accel_label));
-        setStatus(`VOD ready. ${{formatBytes(data.size_bytes || 0)}} prepared.`);
-        return;
-      }}
-      if (data.status === "failed") {{
-        setStatus(data.detail || "VOD build failed.");
-        return;
-      }}
-      if (!vodAttached && data.can_play_while_building && data.playlist_url) {{
-        vodAttached = true;
-        attachHls(data.playlist_url, false, playbackPathLabel(data.playback_path || "VOD", data.accel_label));
-      }}
-      if (data.status === "processing") {{
-        const sizeText = formatBytes(data.size_bytes || 0);
-        if (data.stalled) {{
-          setStatus(`VOD appears stalled at ${{sizeText}}. The source may be unstable right now.`);
-        }} else if (data.can_play_while_building) {{
-          setStatus(`VOD is playable while still building... ${{sizeText}} prepared so far.`);
-        }} else {{
-          setStatus(`Building VOD in the background... ${{sizeText}} written so far.`);
-        }}
-      }} else if (data.status === "partial") {{
-        if (data.can_play_while_building) {{
-          setStatus(`Partial VOD is already playable. ${{formatBytes(data.size_bytes || 0)}} prepared so far.`);
-        }} else {{
-          setStatus(`A partial VOD file exists (${{formatBytes(data.size_bytes || 0)}}), but the build has not completed.`);
-        }}
-      }} else {{
-        setStatus("Waiting for VOD build to start...");
-      }}
-      vodPollTimer = setTimeout(() => {{
-        pollVodStatus().catch(error => {{
-          setStatus(error.message || "Could not continue VOD status checks.");
-        }});
-      }}, 4000);
-    }}
-
-    vodModeButton.addEventListener("click", () => {{
-      bootstrapVod().catch(error => {{
-        setStatus(error.message || "Could not start VOD playback.");
-      }});
-    }});
-
-    bootstrapVod().catch(error => {{
-      setStatus(error.message || "Could not start browser playback.");
-    }});
-    loadProbe().catch(error => {{
-      setProbeStatus(error.message || "Could not inspect source tracks.");
-    }});
-
-    document.title = `${{title}} | Browser Player`;
-  </script>
-</body>
-</html>"""
-
-
-HTML = """<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>M3U Library</title>
-  <style>
-    :root {
-      --bg: #f2efe8;
-      --bg-strong: #e8e0d1;
-      --panel: rgba(255, 251, 244, 0.9);
-      --panel-solid: #fffaf2;
-      --text: #1f2430;
-      --muted: #6c746f;
-      --line: #ddd1bc;
-      --accent: #a74f2f;
-      --accent-strong: #8d3c21;
-      --highlight: #d4a62a;
-      --success: #2f7b58;
-      --shadow: 0 16px 40px rgba(78, 55, 24, 0.12);
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      font-family: "Trebuchet MS", "Segoe UI", system-ui, sans-serif;
-      color: var(--text);
-      background:
-        radial-gradient(circle at top left, rgba(212, 166, 42, 0.18), transparent 28%),
-        radial-gradient(circle at top right, rgba(167, 79, 47, 0.16), transparent 24%),
-        linear-gradient(180deg, #f8f4ec 0%, var(--bg) 40%, #ece3d4 100%);
-      min-height: 100vh;
-    }
-    *:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-    header {
-      position: sticky;
-      top: 0;
-      z-index: 5;
-      backdrop-filter: blur(18px);
-      background: rgba(248, 244, 236, 0.86);
-      border-bottom: 1px solid rgba(166, 138, 93, 0.18);
-    }
-    .shell, main {
-      max-width: 1260px;
-      margin: 0 auto;
-      padding: 20px 24px;
-    }
-    .shell {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 18px;
-      align-items: center;
-    }
-    h1 {
-      margin: 0;
-      font-size: clamp(28px, 3vw, 40px);
-      line-height: 1;
-      letter-spacing: 0;
-    }
-    .subtitle {
-      margin-top: 8px;
-      color: var(--muted);
-      font-size: 14px;
-    }
-    .actions, .row, .card-actions {
-      display: flex;
-      gap: 10px;
-      flex-wrap: wrap;
-      align-items: center;
-    }
-    .actions {
-      flex-direction: column;
-      align-items: flex-end;
-      gap: 8px;
-    }
-    .refresh-meta {
-      color: var(--muted);
-      font-size: 13px;
-    }
-    button, select, input, .button {
-      border: 1px solid var(--line);
-      background: var(--panel-solid);
-      color: var(--text);
-      border-radius: 10px;
-      font: inherit;
-      text-decoration: none;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      min-height: 42px;
-      padding: 0 14px;
-      transition: transform 140ms ease, background 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
-    }
-    button:hover, .button:hover, select:hover, input:hover {
-      transform: translateY(-1px);
-      border-color: #c59d63;
-      box-shadow: 0 10px 18px rgba(66, 44, 17, 0.08);
-    }
-    .primary {
-      cursor: pointer;
-      background: var(--accent);
-      color: #fff9f4;
-      border-color: var(--accent);
-      font-weight: 700;
-    }
-    .primary:hover { background: var(--accent-strong); }
-    .secondary { background: var(--panel-solid); }
-    .icon-button {
-      width: 42px;
-      min-width: 42px;
-      padding: 0;
-      font-size: 18px;
-      border-radius: 12px;
-    }
-    .icon-button.active-favorite {
-      background: rgba(212, 166, 42, 0.14);
-      border-color: rgba(212, 166, 42, 0.55);
-      color: #9c6a00;
-    }
-    .icon-button.active-watched {
-      background: rgba(47, 123, 88, 0.14);
-      border-color: rgba(47, 123, 88, 0.45);
-      color: var(--success);
-    }
-    .pill-new {
-      background: rgba(212, 166, 42, 0.18);
-      border-color: rgba(212, 166, 42, 0.5);
-      color: #936000;
-      font-weight: 700;
-    }
-    .hero {
-      margin-top: 18px;
-      padding: 24px;
-      border: 1px solid rgba(166, 138, 93, 0.18);
-      border-radius: 20px;
-      background:
-        linear-gradient(135deg, rgba(255,255,255,0.75), rgba(255,248,236,0.88)),
-        linear-gradient(120deg, rgba(212,166,42,0.13), rgba(167,79,47,0.08));
-      box-shadow: var(--shadow);
-      display: grid;
-      gap: 18px;
-    }
-    .stats {
-      display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 12px;
-    }
-    .stat {
-      background: rgba(255, 252, 246, 0.7);
-      border: 1px solid rgba(166, 138, 93, 0.18);
-      border-radius: 14px;
-      padding: 14px 16px;
-      min-height: 86px;
-      display: grid;
-      align-content: space-between;
-    }
-    button.stat {
-      width: 100%;
-      text-align: left;
-      justify-items: start;
-      cursor: pointer;
-      min-height: 86px;
-      padding: 14px 16px;
-    }
-    .stat.active {
-      border-color: rgba(167, 79, 47, 0.45);
-      background: rgba(167, 79, 47, 0.08);
-      box-shadow: 0 10px 18px rgba(66, 44, 17, 0.08);
-    }
-    .stat-label {
-      font-size: 12px;
-      color: var(--muted);
-      text-transform: uppercase;
-      letter-spacing: 0.06em;
-    }
-    .stat-value {
-      font-size: 24px;
-      font-weight: 700;
-    }
-    .filters {
-      display: grid;
-      grid-template-columns: minmax(220px, 1.5fr) 160px 220px 180px;
-      gap: 12px;
-      margin: 18px 0;
-    }
-    input, select { width: 100%; }
-    .status {
-      color: var(--muted);
-      font-size: 14px;
-      min-height: 20px;
-    }
-    .update-banner {
-      background: rgba(47, 123, 88, 0.12);
-      border: 1px solid rgba(47, 123, 88, 0.35);
-      color: var(--success);
-      padding: 12px 16px;
-      border-radius: 12px;
-      margin-top: 12px;
-      display: flex;
-      gap: 12px;
-      align-items: center;
-      justify-content: space-between;
-    }
-    .update-banner[hidden] { display: none; }
-    .update-banner button {
-      min-height: 32px;
-      padding: 0 12px;
-      font-size: 13px;
-    }
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
-      gap: 16px;
-    }
-    .item {
-      display: grid;
-      grid-template-columns: 112px 1fr;
-      background: var(--panel);
-      border: 1px solid rgba(166, 138, 93, 0.22);
-      border-radius: 18px;
-      overflow: hidden;
-      box-shadow: var(--shadow);
-      min-height: 240px;
-    }
-    .poster {
-      background:
-        linear-gradient(180deg, rgba(212,166,42,0.18), rgba(167,79,47,0.12)),
-        #e9dfd2;
-      min-height: 240px;
-      display: grid;
-      place-items: center;
-      color: rgba(31, 36, 48, 0.58);
-      font-weight: 700;
-      letter-spacing: 0.08em;
-      font-size: 12px;
-    }
-    .poster img {
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-      display: block;
-    }
-    .details {
-      padding: 16px;
-      display: grid;
-      gap: 12px;
-      align-content: start;
-      min-width: 0;
-    }
-    .card-top {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 12px;
-      align-items: start;
-    }
-    .title {
-      font-size: 18px;
-      font-weight: 700;
-      line-height: 1.2;
-      overflow-wrap: anywhere;
-    }
-    .meta {
-      color: var(--muted);
-      font-size: 13px;
-      line-height: 1.4;
-    }
-    .source-tags {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px;
-      margin-top: 4px;
-    }
-    .source-tag {
-      width: fit-content;
-      max-width: 100%;
-      border: 1px solid rgba(166, 138, 93, 0.24);
-      border-radius: 999px;
-      padding: 2px 8px;
-      font-size: 11px;
-      color: var(--muted);
-      background: rgba(255, 249, 239, 0.6);
-      text-transform: uppercase;
-      letter-spacing: 0.02em;
-      overflow-wrap: anywhere;
-    }
-    .pill {
-      width: fit-content;
-      max-width: 100%;
-      border: 1px solid rgba(166, 138, 93, 0.32);
-      border-radius: 999px;
-      padding: 4px 10px;
-      font-size: 12px;
-      color: var(--muted);
-      background: rgba(255, 249, 239, 0.75);
-    }
-    .metadata {
-      display: grid;
-      gap: 8px;
-      color: var(--muted);
-      font-size: 13px;
-      min-height: 68px;
-    }
-    .metadata-head {
-      display: flex;
-      gap: 10px;
-      flex-wrap: wrap;
-      align-items: center;
-    }
-    .metadata-title {
-      color: var(--text);
-      font-weight: 700;
-    }
-    .rating {
-      font-weight: 700;
-      color: #956300;
-    }
-    .card-actions {
-      align-items: center;
-      justify-content: space-between;
-      margin-top: auto;
-    }
-    .action-group {
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-      align-items: center;
-    }
-    .pager {
-      display: flex;
-      justify-content: center;
-      padding: 22px 0 8px;
-    }
-    .empty {
-      border: 1px dashed rgba(166, 138, 93, 0.38);
-      border-radius: 18px;
-      color: var(--muted);
-      padding: 42px 26px;
-      text-align: center;
-      background: rgba(255, 252, 246, 0.78);
-    }
-    .series-hero {
-      display: grid;
-      grid-template-columns: 180px minmax(0, 1fr);
-      gap: 18px;
-      align-items: start;
-    }
-    .series-hero-poster {
-      min-height: 270px;
-      border-radius: 18px;
-      overflow: hidden;
-      background: #e9dfd2;
-      display: grid;
-      place-items: center;
-      font-weight: 700;
-      color: rgba(31, 36, 48, 0.58);
-    }
-    .series-hero-poster img { width: 100%; height: 100%; object-fit: cover; display: block; }
-    .season-block {
-      margin-top: 18px;
-      border: 1px solid rgba(166, 138, 93, 0.18);
-      border-radius: 18px;
-      background: rgba(255, 252, 246, 0.86);
-      overflow: hidden;
-    }
-    .season-header {
-      padding: 14px 16px;
-      font-weight: 700;
-      border-bottom: 1px solid rgba(166, 138, 93, 0.18);
-      background: rgba(245, 235, 220, 0.8);
-    }
-    .episode-row {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 12px;
-      padding: 14px 16px;
-      border-bottom: 1px solid rgba(166, 138, 93, 0.12);
-      align-items: center;
-    }
-    .episode-row:last-child { border-bottom: 0; }
-    .episode-title { font-weight: 700; }
-    .episode-meta { color: var(--muted); font-size: 13px; margin-top: 4px; }
-    @media (max-width: 900px) {
-      .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .filters { grid-template-columns: 1fr; }
-    }
-    @media (max-width: 720px) {
-      .shell { grid-template-columns: 1fr; }
-      .item { grid-template-columns: 96px 1fr; min-height: 220px; }
-      .poster { min-height: 220px; }
-      .grid { grid-template-columns: 1fr; }
-      .stats { grid-template-columns: 1fr 1fr; }
-      .series-hero { grid-template-columns: 1fr; }
-      .series-hero-poster { min-height: 220px; max-width: 220px; }
-    }
-  </style>
-</head>
-<body>
-  <header>
-    <div class="shell">
-      <div>
-        <h1>M3U Library</h1>
-        <div class="subtitle">Your streaming catalog with metadata, favorites, and watched tracking.</div>
-      </div>
-      <div class="actions">
-        <button id="refresh" class="primary">Refresh Library</button>
-        <a href="/settings" class="secondary" style="text-decoration:none; display:inline-flex; align-items:center; padding:9px 14px; border:1px solid var(--line); border-radius:10px; color:var(--accent); background:var(--panel-solid);">Settings</a>
-        <select id="newWindow" class="secondary">
-          <option value="refresh">New: this refresh</option>
-          <option value="7">New: this week</option>
-          <option value="30">New: this month</option>
-          <option value="90">New: last 3 months</option>
-          <option value="180">New: last 6 months</option>
-        </select>
-        <div class="refresh-meta">Last refresh: <span id="statRefresh">Never</span></div>
-      </div>
-    </div>
-  </header>
-  <main>
-    <section class="hero">
-      <div class="stats">
-        <button class="stat active" data-section="all" id="statAllCard"><div class="stat-label">Total Items</div><div class="stat-value" id="statTotal">0</div></button>
-        <button class="stat" data-section="trending" id="statTrendingCard"><div class="stat-label">Trending This Week</div><div class="stat-value" id="statTrending">0</div></button>
-        <button class="stat" data-section="popular" id="statPopularCard"><div class="stat-label">Popular</div><div class="stat-value" id="statPopular">0</div></button>
-        <button class="stat" data-section="upcoming" id="statUpcomingCard"><div class="stat-label">Upcoming</div><div class="stat-value" id="statUpcoming">0</div></button>
-        <button class="stat" data-section="new" id="statNewCard"><div class="stat-label">New</div><div class="stat-value" id="statNew">0</div></button>
-        <button class="stat" data-section="favorites" id="statFavoritesCard"><div class="stat-label">Favorites</div><div class="stat-value" id="statFavorites">0</div></button>
-        <button class="stat" data-section="watched" id="statWatchedCard"><div class="stat-label">Watched</div><div class="stat-value" id="statWatched">0</div></button>
-        <button class="stat" data-section="lastWatched" id="statLastWatchedCard"><div class="stat-label">Last Watched</div><div class="stat-value" id="statLastWatched">0</div></button>
-      </div>
-      <div class="status" id="status">Loading library...</div>
-      <div id="updateBanner" class="update-banner" hidden>
-        <span>Refresh complete — new content available.</span>
-        <button id="updateBannerAction" class="primary">Click to update</button>
-      </div>
-    </section>
-
-    <section class="filters">
-      <input id="search" placeholder="Search title or group">
-      <select id="kind">
-        <option value="">All types</option>
-        <option value="live">Live TV</option>
-        <option value="movie">Movies</option>
-        <option value="series">Series</option>
-      </select>
-      <select id="group"><option value="">All groups</option></select>
-      <select id="sort">
-        <option value="added">Recently added</option>
-        <option value="new">Newest first</option>
-        <option value="rating">Highest rating</option>
-        <option value="release">Latest release</option>
-        <option value="title">Title A-Z</option>
-      </select>
-    </section>
-
-    <section id="library" class="grid"></section>
-    <div class="pager"><button class="secondary" id="loadMore" hidden>Load more</button></div>
-  </main>
-  <script>
-    const state = {
-      items: [],
-      limit: 60,
-      matched: 0,
-      total: 0,
-      section: "all",
-      groups: [],
-      sectionCounts: { all: 0, trending: 0, popular: 0, upcoming: 0, new: 0, favorites: 0, watched: 0, lastWatched: 0 },
-      lastRefresh: null,
-      newWindow: "refresh",
-      metadataStatus: { running: false, completed: 0, total: 0, error: null }
-    };
-    const els = {
-      status: document.querySelector("#status"),
-      library: document.querySelector("#library"),
-      refresh: document.querySelector("#refresh"),
-      search: document.querySelector("#search"),
-      kind: document.querySelector("#kind"),
-      group: document.querySelector("#group"),
-      loadMore: document.querySelector("#loadMore"),
-      statTotal: document.querySelector("#statTotal"),
-      statTrending: document.querySelector("#statTrending"),
-      statPopular: document.querySelector("#statPopular"),
-      statUpcoming: document.querySelector("#statUpcoming"),
-      statNew: document.querySelector("#statNew"),
-      statFavorites: document.querySelector("#statFavorites"),
-      statWatched: document.querySelector("#statWatched"),
-      statLastWatched: document.querySelector("#statLastWatched"),
-      statRefresh: document.querySelector("#statRefresh"),
-      sort: document.querySelector("#sort"),
-      newWindow: document.querySelector("#newWindow"),
-      statCards: [...document.querySelectorAll(".stats [data-section]")],
-      main: document.querySelector("main")
-    };
-    const esc = value => String(value ?? "").replace(/[&<>"']/g, char => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[char]));
-    const yearOf = value => value ? String(value).slice(0, 4) : "";
-    const currentSeriesId = location.pathname.startsWith("/series/") ? decodeURIComponent(location.pathname.split("/").pop()) : null;
-    const pageParams = new URLSearchParams(location.search);
-
-    const CACHE_KEY = 'm3u-library-cache-v1';
-
-    function loadCache() {
-      try { return JSON.parse(localStorage.getItem(CACHE_KEY)) || null; } catch { return null; }
-    }
-
-    function saveCache(state) {
-      try { localStorage.setItem(CACHE_KEY, JSON.stringify(state)); } catch {}
-    }
-
-    function clearCache() {
-      try { localStorage.removeItem(CACHE_KEY); } catch {}
-    }
-
-    function showUpdateBanner() {
-      const banner = document.getElementById("updateBanner");
-      if (banner) banner.hidden = false;
-    }
-
-    function hideUpdateBanner() {
-      const banner = document.getElementById("updateBanner");
-      if (banner) banner.hidden = true;
-    }
-
-    function currentLibraryParams() {
-      const params = new URLSearchParams();
-      if (els.search.value.trim()) params.set("q", els.search.value.trim());
-      if (els.kind.value) params.set("kind", els.kind.value);
-      if (els.group.value) params.set("group", els.group.value);
-      if (els.sort.value && els.sort.value !== "added") params.set("sort", els.sort.value);
-      if (state.section && state.section !== "all") params.set("section", state.section);
-      if (state.newWindow && state.newWindow !== "refresh") params.set("new_window", state.newWindow);
-      return params;
-    }
-
-    function libraryHref() {
-      const params = currentSeriesId ? pageParams : currentLibraryParams();
-      const query = params.toString();
-      return query ? `/?${query}` : "/";
-    }
-
-    function syncLibraryUrl() {
-      if (currentSeriesId) return;
-      const query = currentLibraryParams().toString();
-      history.replaceState(null, "", query ? `/?${query}` : "/");
-    }
-
-    function metadataStatusText() {
-      if (state.metadataStatus.error) return `Metadata warm-up error: ${state.metadataStatus.error}`;
-      if (state.metadataStatus.running) return `Metadata warming up in background: ${state.metadataStatus.completed}/${state.metadataStatus.total}`;
-      if (state.metadataStatus.total && state.metadataStatus.completed >= state.metadataStatus.total) return "Metadata cache is ready.";
-      return "";
-    }
-
-    function updateGroups(groups) {
-      const current = els.group.value;
-      state.groups = groups || [];
-      els.group.innerHTML = '<option value="">All groups</option>' + state.groups.map(group => `<option value="${esc(group)}">${esc(group)}</option>`).join("");
-      els.group.value = state.groups.includes(current) ? current : "";
-    }
-
-    function applyStats() {
-      els.statTotal.textContent = String(state.total || 0);
-      els.statTrending.textContent = String(state.sectionCounts.trending || 0);
-      els.statPopular.textContent = String(state.sectionCounts.popular || 0);
-      els.statUpcoming.textContent = String(state.sectionCounts.upcoming || 0);
-      els.statNew.textContent = String(state.sectionCounts.new || 0);
-      els.statFavorites.textContent = String(state.sectionCounts.favorites || 0);
-      els.statWatched.textContent = String(state.sectionCounts.watched || 0);
-      els.statLastWatched.textContent = String(state.sectionCounts.lastWatched || 0);
-      els.statRefresh.textContent = state.lastRefresh ? new Date(state.lastRefresh).toLocaleString() : "Never";
-      if (els.newWindow) els.newWindow.value = state.newWindow || "refresh";
-      els.statCards.forEach(card => card.classList.toggle("active", card.dataset.section === state.section));
-    }
-
-    function metadataMarkup(item) {
-      if (!item.metadata_title && !item.release_date && item.kind !== "live") {
-        return '<span>Queued for background metadata loading...</span>';
-      }
-      const title = item.metadata_title || item.title;
-      const release = yearOf(item.release_date);
-      const rating = item.rating || item.rating === 0 ? Number(item.rating).toFixed(1) : "n/a";
-      const description = item.description ? esc(item.description) : "No summary yet.";
-      return `
-        <div class="metadata-head">
-          <span class="metadata-title">${esc(title)}</span>
-          ${release ? `<span class="pill">${esc(release)}</span>` : ""}
-          ${item.kind !== "live" ? `<span class="rating">&#9733; ${esc(rating)}</span>` : ""}
-        </div>
-        <div>${description}</div>
-      `;
-    }
-
-    function sourceTags(sourceTitle) {
-      if (!sourceTitle) return "";
-      const tags = new Set();
-      const yearRe = /^(19|20)\d{2}$/;
-      let match;
-      const bracketRe = /\[([^\]]+)\]/g;
-      while ((match = bracketRe.exec(sourceTitle)) !== null) {
-        const tag = match[1].trim().toUpperCase();
-        if (tag && !yearRe.test(tag)) tags.add(tag);
-      }
-      const markerRe = /\b(4K|UHD|FHD|HD|MULTI-SUBS|MULTI SUBS|SUBBED|DUBBED|DE|EN|FR|ES|IT|NL|PL|RU|TR|AR|PT|JA|KO|ZH|HI)\b/gi;
-      while ((match = markerRe.exec(sourceTitle)) !== null) {
-        tags.add(match[1].toUpperCase());
-      }
-      if (!tags.size) return "";
-      return `<div class="source-tags">${[...tags].map(t => `<span class="source-tag">${esc(t)}</span>`).join("")}</div>`;
-    }
-
-    function seriesCardHtml(item) {
-      const poster = item.poster_url
-        ? `<img src="${esc(item.poster_url)}" alt="">`
-        : "SERIES";
-      const favoriteClass = item.is_favorite ? "icon-button active-favorite" : "icon-button";
-      const watchedClass = item.is_watched ? "icon-button active-watched" : "icon-button";
-      const rating = item.rating || item.rating === 0 ? Number(item.rating).toFixed(1) : "n/a";
-      return `
-        <article class="item" data-series-card="${esc(item.id)}" data-item-id="${esc(item.id)}">
-          <div class="poster">${poster}</div>
-          <div class="details">
-            <div class="card-top">
-              <div>
-                <div class="title">${esc(item.title)}</div>
-                ${sourceTags(item.source_title)}
-                <div class="meta">${esc(item.episode_count)} episodes across ${esc(item.season_count || 1)} seasons · ${esc(item.watched_episode_count || 0)} / ${esc(item.episode_count)} watched</div>
-              </div>
-              <div class="action-group">
-                <button class="${favoriteClass}" data-series-favorite="${esc(item.id)}" title="Toggle favorite">&#9733;</button>
-                <button class="${watchedClass}" data-series-watched="${esc(item.id)}" title="Toggle watched">&#10003;</button>
-              </div>
-            </div>
-            <div class="row">
-              <span class="pill">series</span>
-              ${item.is_new ? '<span class="pill pill-new">New</span>' : ""}
-              ${item.is_favorite ? '<span class="pill">Favorite</span>' : ""}
-              ${item.is_watched ? '<span class="pill">Watched</span>' : ""}
-            </div>
-            <div class="metadata">
-              <div class="metadata-head">
-                ${item.release_date ? `<span class="pill">${esc(yearOf(item.release_date))}</span>` : ""}
-                <span class="rating">&#9733; ${esc(rating)}</span>
-              </div>
-              <div>${esc(item.description || "Queued for background metadata loading...")}</div>
-            </div>
-            <div class="card-actions">
-              <div class="action-group">
-                <a class="button primary" href="/series/${encodeURIComponent(item.id)}${currentLibraryParams().toString() ? `?${currentLibraryParams().toString()}` : ""}">Open series</a>
-              </div>
-            </div>
-          </div>
-        </article>
-      `;
-    }
-
-    function normalizeHtml(html) {
-      return html.replace(/\s+/g, " ").replace(/>\s+</g, "><").trim();
-    }
-
-    function renderLibraryIncremental(cardHtmlFn, emptyMessage, statusPrefix = "") {
-      applyStats();
-      els.status.textContent = metadataStatusText() || `${state.items.length} ${statusPrefix}shown / ${state.matched} matched`;
-      els.loadMore.hidden = state.items.length >= state.matched;
-      if (!state.items.length) {
-        els.library.className = "empty";
-        els.library.textContent = emptyMessage;
-        return;
-      }
-      els.library.className = "grid";
-      const existing = new Map();
-      for (const card of els.library.querySelectorAll("[data-item-id]")) {
-        existing.set(card.dataset.itemId, card);
-      }
-      const fragment = document.createDocumentFragment();
-      for (const item of state.items) {
-        const html = cardHtmlFn(item);
-        const old = existing.get(item.id);
-        if (old && normalizeHtml(old.outerHTML) === normalizeHtml(html)) {
-          fragment.appendChild(old);
-        } else {
-          const wrapper = document.createElement("div");
-          wrapper.innerHTML = html.trim();
-          fragment.appendChild(wrapper.firstElementChild);
-        }
-      }
-      els.library.innerHTML = "";
-      els.library.appendChild(fragment);
-    }
-
-    function mixedCardHtml(item) {
-      if (item.kind === "series") return seriesCardHtml(item);
-      const poster = item.poster_url
-        ? `<img src="${esc(item.poster_url)}" alt="">`
-        : item.logo
-          ? `<img src="${esc(item.logo)}" alt="">`
-          : esc(item.kind === "live" ? "LIVE" : "MOVIE");
-      const favoriteClass = item.is_favorite ? "icon-button active-favorite" : "icon-button";
-      const watchedClass = item.is_watched ? "icon-button active-watched" : "icon-button";
-      const isExternal = !!item.is_external;
-      return `
-        <article class="item" data-card="${esc(item.id)}" data-item-id="${esc(item.id)}">
-          <div class="poster" data-poster>${poster}</div>
-          <div class="details">
-            <div class="card-top">
-              <div>
-                <div class="title">${esc(item.title)}</div>
-                ${sourceTags(item.source_title)}
-                <div class="meta">${esc(item.group_name || "Uncategorized")}</div>
-              </div>
-              <div class="action-group"${isExternal ? ' hidden' : ""}>
-                <button class="${favoriteClass}" data-favorite="${esc(item.id)}" title="Toggle favorite">&#9733;</button>
-                <button class="${watchedClass}" data-watched="${esc(item.id)}" title="Toggle watched">&#10003;</button>
-              </div>
-            </div>
-            <div class="row">
-              <span class="pill">${esc(item.kind)}</span>
-              ${isExternal ? '<span class="pill">TMDB</span>' : ""}
-              ${item.is_new ? '<span class="pill pill-new">New</span>' : ""}
-              ${item.is_favorite ? '<span class="pill">Favorite</span>' : ""}
-              ${item.is_watched ? '<span class="pill">Watched</span>' : ""}
-            </div>
-            <div class="metadata" data-metadata>${metadataMarkup(item)}</div>
-            <div class="card-actions">
-              <div class="action-group">
-                ${isExternal
-                  ? `<a class="button primary" href="${esc(item.provider_url || "#")}" target="_blank" rel="noreferrer">View on TMDB</a>`
-                  : `<a class="button secondary" href="/play/${encodeURIComponent(item.id)}">Browser</a>
-                     <a class="button primary" href="/watch/${encodeURIComponent(item.id)}.m3u">Open</a>`}
-              </div>
-            </div>
-          </div>
-        </article>
-      `;
-    }
-
-    function renderMixedItems() {
-      const emptyMessage = state.section === "all"
-        ? "No items to show. Refresh the library after configuring the environment."
-        : state.section === "trending"
-          ? "No trending movies from TMDB are currently available in your library."
-          : state.section === "popular"
-            ? "No popular movies from TMDB are currently available in your library."
-            : state.section === "upcoming"
-              ? "No upcoming movies are available from TMDB right now."
-            : state.section === "lastWatched"
-              ? "No recently watched items yet."
-          : `No items marked in ${state.section} yet.`;
-      renderLibraryIncremental(mixedCardHtml, emptyMessage, "");
-    }
-
-    function renderSeriesCards() {
-      const emptyMessage = state.section === "trending"
-        ? "No trending series from TMDB are currently available in your library."
-        : state.section === "popular"
-          ? "No popular series from TMDB are currently available in your library."
-          : state.section === "upcoming"
-            ? "Upcoming is only available for movies."
-        : "No series to show for the current filters.";
-      renderLibraryIncremental(seriesCardHtml, emptyMessage, "series ");
-    }
-
-    function renderLibrary() {
-      if (els.kind.value === "series" && state.section !== "lastWatched") renderSeriesCards();
-      else renderMixedItems();
-    }
-
-    let csrfToken = null;
-
-    async function refreshAuthStatus() {
-      try {
-        const res = await fetch("/api/auth/status", {cache: "no-store"});
-        const data = await res.json();
-        if (data.authenticated) csrfToken = data.csrf;
-      } catch (error) {
-        csrfToken = null;
-      }
-    }
-
-    async function apiFetch(url, options = {}) {
-      const method = (options.method || "GET").toUpperCase();
-      const headers = Object.assign({}, options.headers || {});
-      if (csrfToken && method !== "GET") headers["X-CSRF-Token"] = csrfToken;
-      return fetch(url, {
-        cache: "no-store",
-        ...options,
-        headers
-      });
-    }
-
-    async function enrichVisibleMetadata() {
-      if (els.kind.value === "series" && state.section !== "lastWatched") return;
-      const ids = state.items
-        .filter(item => item.kind !== "live" && item.kind !== "series" && !item.metadata_title && !item.poster_url)
-        .slice(0, 18)
-        .map(item => item.id);
-      if (!ids.length) return;
-      try {
-        const res = await apiFetch("/api/metadata/enrich", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(ids)
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || "Metadata enrichment failed");
-        const byId = Object.fromEntries((data.items || []).map(item => [item.item_id, item]));
-        let changed = false;
-        state.items = state.items.map(item => {
-          const meta = byId[item.id];
-          if (!meta) return item;
-          changed = true;
-          return { ...item, metadata_title: meta.title, release_date: meta.release_date, rating: meta.rating, description: meta.description, poster_url: meta.poster_url };
-        });
-        if (changed) renderLibrary();
-      } catch (error) {
-        console.error(error);
-      }
-    }
-
-    async function load(append = false) {
-      const isSeriesView = els.kind.value === "series";
-      let endpoint;
-      if (state.section === "lastWatched") {
-        const params = new URLSearchParams({
-          limit: String(state.limit),
-          offset: append ? String(state.items.length) : "0"
-        });
-        endpoint = `/api/last-watched?${params}`;
-      } else {
-        const params = new URLSearchParams({
-          limit: String(state.limit),
-          offset: append ? String(state.items.length) : "0",
-          section: state.section,
-          sort: els.sort.value,
-          new_window: state.newWindow || "refresh"
-        });
-        if (els.search.value.trim()) params.set("q", els.search.value.trim());
-        if (!isSeriesView && els.kind.value) params.set("kind", els.kind.value);
-        if (els.group.value && !isSeriesView) params.set("group", els.group.value);
-        endpoint = isSeriesView ? `/api/series?${params}` : `/api/items?${params}`;
-      }
-      syncLibraryUrl();
-      els.status.textContent = append ? "Loading more..." : "Loading library...";
-      const res = await apiFetch(endpoint);
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || "Load failed");
-      state.items = append ? state.items.concat(data.items) : data.items;
-      state.matched = data.matched;
-      state.total = data.total;
-      state.groups = data.groups || [];
-      state.sectionCounts = data.section_counts || state.sectionCounts;
-      state.lastRefresh = data.last_refresh;
-      state.metadataStatus = data.metadata_status || state.metadataStatus;
-      if (!isSeriesView) updateGroups(state.groups);
-      renderLibrary();
-      enrichVisibleMetadata();
-      saveCache({
-        lastRefresh: state.lastRefresh,
-        items: state.items,
-        matched: state.matched,
-        total: state.total,
-        groups: state.groups,
-        sectionCounts: state.sectionCounts,
-        kind: els.kind.value,
-        section: state.section,
-        sort: els.sort.value,
-        search: els.search.value || "",
-        group: els.group.value || "",
-        newWindow: state.newWindow,
-        seriesQuery: endpoint
-      });
-    }
-
-    async function refreshSectionCountsOnly() {
-      if (!currentSeriesId) return;
-      const isSeriesView = els.kind.value === "series";
-      const params = new URLSearchParams({
-        limit: "1",
-        offset: "0",
-        section: state.section,
-        sort: els.sort.value,
-        new_window: state.newWindow || "refresh"
-      });
-      if (els.search.value.trim()) params.set("q", els.search.value.trim());
-      if (!isSeriesView && els.kind.value) params.set("kind", els.kind.value);
-      if (els.group.value && !isSeriesView) params.set("group", els.group.value);
-      const endpoint = isSeriesView ? `/api/series?${params}` : `/api/items?${params}`;
-      const res = await apiFetch(endpoint);
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || "Section refresh failed");
-      state.sectionCounts = data.section_counts || state.sectionCounts;
-      state.lastRefresh = data.last_refresh || state.lastRefresh;
-      applyStats();
-    }
-
-    async function refreshMetadataStatus() {
-      const res = await apiFetch("/api/metadata/status");
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || "Metadata status failed");
-      state.metadataStatus = data;
-      applyStats();
-      enrichVisibleMetadata();
-    }
-
-    async function bootstrap() {
-      const res = await apiFetch("/api/status");
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || "Status failed");
-      state.metadataStatus = data.metadata_status || state.metadataStatus;
-      applyStats();
-      return data;
-    }
-
-    async function refresh() {
-      els.refresh.disabled = true;
-      els.status.textContent = "Refreshing playlist...";
-      try {
-        const res = await apiFetch("/api/refresh", { method: "POST" });
-        const data = await res.json();
-        if (!res.ok) {
-          if (res.status === 403) {
-            throw new Error("Authentication required — open Settings to log in, then try again.");
-          }
-          throw new Error(data.detail || "Refresh failed");
-        }
-        state.lastRefresh = data.last_refresh;
-        state.metadataStatus = { running: true, completed: 0, total: 0, error: null };
-        applyStats();
-        showUpdateBanner();
-      } catch (error) {
-        els.status.textContent = error.message;
-      } finally {
-        els.refresh.disabled = false;
-      }
-    }
-
-    async function toggleItem(id, mode) {
-      const res = await apiFetch(`/api/items/${encodeURIComponent(id)}/${mode}`, { method: "POST" });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || `Could not update ${mode}`);
-      return data;
-    }
-
-    async function toggleSeries(id, mode) {
-      const res = await apiFetch(`/api/series/${encodeURIComponent(id)}/${mode}`, { method: "POST" });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || `Could not update ${mode}`);
-      return data;
-    }
-
-    function activeClassForMode(mode) {
-      return mode === "favorite" ? "active-favorite" : "active-watched";
-    }
-
-    function countKeyForMode(mode) {
-      return mode === "favorite" ? "favorites" : "watched";
-    }
-
-    function stateKeyForMode(mode) {
-      return mode === "favorite" ? "is_favorite" : "is_watched";
-    }
-
-    function updateCardPill(card, pillText, active) {
-      const row = card.querySelector(".row");
-      if (!row) return;
-      const existing = Array.from(row.children).find(el => el.textContent === pillText);
-      if (active && !existing) {
-        const pill = document.createElement("span");
-        pill.className = "pill";
-        pill.textContent = pillText;
-        row.appendChild(pill);
-      } else if (!active && existing) {
-        existing.remove();
-      }
-    }
-
-    // Update the UI immediately, call the API, and revert if it fails.
-    // kind is "item" or "series". options.onSuccess / options.onRevert are optional callbacks.
-    async function optimisticToggle(id, mode, kind, buttonEl, options = {}) {
-      const key = stateKeyForMode(mode);
-      const activeClass = activeClassForMode(mode);
-      const item = state.items.find(i => i.id === id);
-      const oldValue = item ? item[key] : (buttonEl.classList.contains(activeClass) ? 1 : 0);
-      const newValue = oldValue ? 0 : 1;
-      const pillText = mode === "favorite" ? "Favorite" : "Watched";
-      const card = buttonEl.closest(".item");
-
-      // Optimistic UI update.
-      buttonEl.classList.toggle(activeClass, !!newValue);
-      if (card) updateCardPill(card, pillText, !!newValue);
-      if (item) item[key] = newValue;
-      if (!currentSeriesId) {
-        const countKey = countKeyForMode(mode);
-        state.sectionCounts[countKey] = Math.max(0, (state.sectionCounts[countKey] || 0) + (newValue ? 1 : -1));
-        applyStats();
-      }
-      if (options.onOptimisticUpdate) options.onOptimisticUpdate(newValue);
-
-      // Remove card from filtered sections when toggled off.
-      let removedCard = false;
-      const section = currentSeriesId ? null : state.section;
-      const shouldRemove = (section === "favorites" && mode === "favorite" && !newValue) ||
-                           ((section === "watched" || section === "lastWatched") && mode === "watched" && !newValue);
-      if (shouldRemove) {
-        const card = buttonEl.closest(".item");
-        if (card) {
-          card.remove();
-          state.items = state.items.filter(i => i.id !== id);
-          state.matched = Math.max(0, state.matched - 1);
-          removedCard = true;
-          els.status.textContent = metadataStatusText() || `${state.items.length} shown / ${state.matched} matched`;
-        }
-      }
-
-      try {
-        const data = kind === "series" ? await toggleSeries(id, mode) : await toggleItem(id, mode);
-        if (item) item[key] = data[key];
-        if (options.onSuccess) options.onSuccess(data);
-        return data;
-      } catch (error) {
-        // Revert optimistic changes.
-        buttonEl.classList.toggle(activeClass, !!oldValue);
-        if (card) updateCardPill(card, pillText, !!oldValue);
-        if (item) item[key] = oldValue;
-        if (!currentSeriesId) {
-          const countKey = countKeyForMode(mode);
-          state.sectionCounts[countKey] = Math.max(0, (state.sectionCounts[countKey] || 0) + (oldValue ? 1 : -1));
-          applyStats();
-        }
-        if (options.onRevert) options.onRevert(oldValue);
-        if (removedCard) {
-          // Card was removed but server failed; reload to restore consistent state.
-          load(false).catch(err => console.error(err));
-        }
-        throw error;
-      }
-    }
-
-    async function renderSeriesDetail(seriesId) {
-      const detailParams = new URLSearchParams({ new_window: state.newWindow || "refresh", _: String(Date.now()) });
-      const res = await apiFetch(`/api/series/${encodeURIComponent(seriesId)}?${detailParams}`);
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || "Series load failed");
-      const series = data.series;
-      const poster = series.poster_url ? `<img src="${esc(series.poster_url)}" alt="">` : "SERIES";
-      const rating = series.rating || series.rating === 0 ? Number(series.rating).toFixed(1) : "n/a";
-      const seasons = Object.entries(data.seasons || {}).map(([season, episodes]) => `
-        <section class="season-block">
-          <div class="season-header">${esc(season)} (${episodes.length})</div>
-          ${episodes.map(episode => `
-            <div class="episode-row">
-              <div>
-                <div class="episode-title">${esc(episode.episode_label || episode.title)}</div>
-                ${sourceTags(episode.title)}
-                <div class="episode-meta">
-                  ${episode.episode_number ? `Episode ${esc(episode.episode_number)}` : ""}
-                  ${episode.is_new ? ' · New' : ""}
-                  ${episode.is_watched ? ' · Watched' : ""}
-                </div>
-              </div>
-              <div class="action-group">
-                <button class="${episode.is_watched ? "icon-button active-watched" : "icon-button"}" data-watched="${esc(episode.id)}">&#10003;</button>
-                <a class="button secondary" href="/play/${encodeURIComponent(episode.id)}">Browser</a>
-                <a class="button primary" href="/watch/${encodeURIComponent(episode.id)}.m3u">Open</a>
-              </div>
-            </div>
-          `).join("")}
-        </section>
-      `).join("");
-      els.main.innerHTML = `
-        <section class="hero">
-          <div class="series-hero">
-            <div class="series-hero-poster">${poster}</div>
-            <div class="details">
-              <div class="card-top">
-                <div>
-                  <div class="title">${esc(series.title)}</div>
-                  <div class="meta">${esc(data.episode_count)} episodes</div>
-                </div>
-                <div class="action-group">
-                  <button class="${series.is_favorite ? "icon-button active-favorite" : "icon-button"}" data-series-favorite="${esc(series.id)}">&#9733;</button>
-                  <button class="${series.is_watched ? "icon-button active-watched" : "icon-button"}" data-series-watched="${esc(series.id)}">&#10003;</button>
-                </div>
-              </div>
-              <div class="row">
-                ${series.release_date ? `<span class="pill">${esc(yearOf(series.release_date))}</span>` : ""}
-                <span class="rating">&#9733; ${esc(rating)}</span>
-                ${series.is_favorite ? '<span class="pill">Favorite</span>' : ""}
-                ${series.is_watched ? '<span class="pill" data-series-watched-pill="1">Watched</span>' : ""}
-              </div>
-              <div class="metadata">${esc(series.description || "No summary yet.")}</div>
-              <div class="row"><a class="button secondary" href="${libraryHref()}">Back to library</a></div>
-            </div>
-          </div>
-          ${seasons}
-        </section>
-      `;
-      els.main.onclick = event => {
-        const seriesFavorite = event.target.closest("[data-series-favorite]");
-        if (seriesFavorite) {
-          optimisticToggle(seriesFavorite.dataset.seriesFavorite, "favorite", "series", seriesFavorite).catch(error => {
-            console.error(error);
-          });
-          return;
-        }
-        const seriesWatched = event.target.closest("[data-series-watched]");
-        if (seriesWatched) {
-          const updatePill = (isWatched) => {
-            let watchedPill = els.main.querySelector("[data-series-watched-pill]");
-            if (isWatched) {
-              if (!watchedPill) {
-                watchedPill = document.createElement("span");
-                watchedPill.className = "pill";
-                watchedPill.dataset.seriesWatchedPill = "1";
-                watchedPill.textContent = "Watched";
-                const rowEl = els.main.querySelector(".series-hero .row");
-                if (rowEl) rowEl.appendChild(watchedPill);
-              }
-            } else if (watchedPill) {
-              watchedPill.remove();
-            }
-          };
-          optimisticToggle(seriesWatched.dataset.seriesWatched, "watched", "series", seriesWatched, {
-            onOptimisticUpdate: (value) => updatePill(value),
-            onRevert: () => updatePill(seriesWatched.classList.contains("active-watched"))
-          }).catch(error => {
-            console.error(error);
-          });
-          return;
-        }
-        const watchedButton = event.target.closest("[data-watched]");
-        if (watchedButton) {
-          const row = watchedButton.closest(".episode-row");
-          const meta = row ? row.querySelector(".episode-meta") : null;
-          const seriesWatchedButton = els.main.querySelector("[data-series-watched]");
-          const updateEpisodeMeta = (isWatched) => {
-            if (meta) {
-              const watchedTag = " · Watched";
-              meta.textContent = meta.textContent.replace(watchedTag, "");
-              if (isWatched) meta.textContent += watchedTag;
-            }
-          };
-          const updateSeriesWatched = (isSeriesWatched) => {
-            if (seriesWatchedButton) {
-              seriesWatchedButton.classList.toggle("active-watched", isSeriesWatched);
-            }
-            let watchedPill = els.main.querySelector("[data-series-watched-pill]");
-            if (isSeriesWatched) {
-              if (!watchedPill) {
-                watchedPill = document.createElement("span");
-                watchedPill.className = "pill";
-                watchedPill.dataset.seriesWatchedPill = "1";
-                watchedPill.textContent = "Watched";
-                const rowEl = els.main.querySelector(".series-hero .row");
-                if (rowEl) rowEl.appendChild(watchedPill);
-              }
-            } else if (watchedPill) {
-              watchedPill.remove();
-            }
-          };
-          optimisticToggle(watchedButton.dataset.watched, "watched", "item", watchedButton, {
-            onOptimisticUpdate: (value) => updateEpisodeMeta(value),
-            onSuccess: (data) => updateSeriesWatched(!!data.series_is_watched),
-            onRevert: () => updateEpisodeMeta(watchedButton.classList.contains("active-watched"))
-          }).catch(error => {
-            console.error(error);
-          });
-        }
-      };
-    }
-
-    if (currentSeriesId) {
-      renderSeriesDetail(currentSeriesId).catch(error => {
-        els.main.innerHTML = `<section class="empty">${esc(error.message)}</section>`;
-      });
-    } else {
-      if (pageParams.has("q")) els.search.value = pageParams.get("q") || "";
-      if (pageParams.has("kind")) els.kind.value = pageParams.get("kind") || "";
-      if (pageParams.has("sort")) els.sort.value = pageParams.get("sort") || "added";
-      if (pageParams.has("section")) state.section = pageParams.get("section") || "all";
-      if (pageParams.has("new_window")) state.newWindow = pageParams.get("new_window") || "refresh";
-      const initialGroup = pageParams.get("group") || "";
-      let timer;
-      els.search.addEventListener("input", () => {
-        clearTimeout(timer);
-        timer = setTimeout(() => load(false).catch(error => els.status.textContent = error.message), 250);
-      });
-      [els.kind, els.group, els.sort].forEach(el => el.addEventListener("change", () => load(false).catch(error => els.status.textContent = error.message)));
-      els.newWindow.addEventListener("change", () => {
-        state.newWindow = els.newWindow.value || "refresh";
-        load(false).catch(error => els.status.textContent = error.message);
-      });
-      els.statCards.forEach(card => card.addEventListener("click", () => {
-        state.section = card.dataset.section;
-        load(false).catch(error => els.status.textContent = error.message);
-      }));
-      els.loadMore.addEventListener("click", () => load(true).catch(error => els.status.textContent = error.message));
-      els.refresh.addEventListener("click", refresh);
-      els.library.addEventListener("click", event => {
-        const favoriteButton = event.target.closest("[data-favorite]");
-        if (favoriteButton) {
-          optimisticToggle(favoriteButton.dataset.favorite, "favorite", "item", favoriteButton).catch(error => {
-            els.status.textContent = error.message;
-          });
-          return;
-        }
-        const watchedButton = event.target.closest("[data-watched]");
-        if (watchedButton) {
-          optimisticToggle(watchedButton.dataset.watched, "watched", "item", watchedButton).catch(error => {
-            els.status.textContent = error.message;
-          });
-          return;
-        }
-        const seriesFavorite = event.target.closest("[data-series-favorite]");
-        if (seriesFavorite) {
-          optimisticToggle(seriesFavorite.dataset.seriesFavorite, "favorite", "series", seriesFavorite).catch(error => {
-            els.status.textContent = error.message;
-          });
-          return;
-        }
-        const seriesWatched = event.target.closest("[data-series-watched]");
-        if (seriesWatched) {
-          optimisticToggle(seriesWatched.dataset.seriesWatched, "watched", "series", seriesWatched).catch(error => {
-            els.status.textContent = error.message;
-          });
-        }
-      });
-      setInterval(() => {
-        refreshMetadataStatus().catch(error => console.error(error));
-      }, 5000);
-
-      document.getElementById("updateBannerAction").addEventListener("click", () => {
-        hideUpdateBanner();
-        load(false).catch(error => els.status.textContent = error.message);
-      });
-
-      await refreshAuthStatus();
-
-      const cache = loadCache();
-      const currentParams = {
-        kind: els.kind.value,
-        section: state.section,
-        sort: els.sort.value,
-        search: els.search.value || "",
-        group: initialGroup,
-        newWindow: state.newWindow
-      };
-      const cacheMatches = cache &&
-        cache.kind === currentParams.kind &&
-        cache.section === currentParams.section &&
-        cache.sort === currentParams.sort &&
-        cache.search === currentParams.search &&
-        cache.group === currentParams.group &&
-        cache.newWindow === currentParams.newWindow;
-
-      let hadUsableCache = false;
-      if (cacheMatches) {
-        hadUsableCache = true;
-        state.items = cache.items;
-        state.matched = cache.matched;
-        state.total = cache.total;
-        state.groups = cache.groups || [];
-        state.sectionCounts = cache.sectionCounts || state.sectionCounts;
-        state.lastRefresh = cache.lastRefresh;
-        updateGroups(state.groups);
-        if (initialGroup && state.groups.includes(initialGroup)) els.group.value = initialGroup;
-        renderLibrary();
-      }
-
-      bootstrap().then(data => {
-        const serverLastRefresh = data.last_refresh;
-        if (!hadUsableCache) {
-          return load(false).then(() => {
-            if (initialGroup && state.groups.includes(initialGroup)) {
-              els.group.value = initialGroup;
-              return load(false);
-            }
-          });
-        }
-        if (serverLastRefresh && serverLastRefresh !== state.lastRefresh) {
-          showUpdateBanner();
-        }
-      }).catch(error => els.status.textContent = error.message);
-    }
-  </script>
-</body>
-</html>"""
-
-
-SETTINGS_HTML = """<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>M3U Library — Settings</title>
-  <style>
-    :root {
-      --bg: #f2efe8; --panel: rgba(255, 251, 244, 0.9); --panel-solid: #fffaf2;
-      --text: #1f2430; --muted: #6c746f; --line: #ddd1bc;
-      --accent: #a74f2f; --accent-strong: #8d3c21;
-      --success: #2f7b58; --error: #b3261e;
-      --shadow: 0 16px 40px rgba(78, 55, 24, 0.12);
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0; font-family: "Trebuchet MS", "Segoe UI", system-ui, sans-serif;
-      color: var(--text);
-      background:
-        radial-gradient(circle at top left, rgba(212, 166, 42, 0.18), transparent 28%),
-        linear-gradient(180deg, #f8f4ec 0%, var(--bg) 40%, #ece3d4 100%);
-      min-height: 100vh;
-    }
-    *:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-    .page { max-width: 720px; margin: 0 auto; padding: 32px 20px 64px; }
-    header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 24px; }
-    h1 { margin: 0; font-size: 1.6rem; }
-    h2 { font-size: 1.1rem; margin: 0 0 14px; }
-    a { color: var(--accent); }
-    .card {
-      background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
-      box-shadow: var(--shadow); padding: 20px; margin-bottom: 20px;
-    }
-    label { display: block; font-size: 0.9rem; font-weight: 600; margin: 14px 0 4px; }
-    label:first-of-type { margin-top: 0; }
-    .hint { font-size: 0.8rem; color: var(--muted); font-weight: 400; margin-top: 2px; }
-    input[type="password"], input[type="text"] {
-      width: 100%; padding: 9px 12px; border: 1px solid var(--line); border-radius: 8px;
-      background: var(--panel-solid); color: var(--text); font-size: 0.95rem; font-family: inherit;
-    }
-    input:focus { border-color: var(--accent); }
-    .row { display: flex; gap: 10px; align-items: center; }
-    .row input { flex: 1; }
-    button {
-      padding: 9px 18px; border: none; border-radius: 8px; font-size: 0.95rem;
-      cursor: pointer; font-family: inherit; background: var(--accent); color: #fff;
-    }
-    button:hover { background: var(--accent-strong); }
-    button.ghost { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
-    button.ghost:hover { background: rgba(167, 79, 47, 0.08); }
-    .status { margin-top: 12px; font-size: 0.9rem; min-height: 1.2em; }
-    .status.ok { color: var(--success); }
-    .status.err { color: var(--error); }
-    .badge { font-size: 0.75rem; padding: 2px 8px; border-radius: 99px; border: 1px solid var(--line); color: var(--muted); }
-    .badge.set { border-color: var(--success); color: var(--success); }
-    .field-head { display: flex; justify-content: space-between; align-items: baseline; }
-    .top-actions { display: flex; gap: 10px; align-items: center; }
-  </style>
-</head>
-<body>
-  <div class="page">
-    <header>
-      <h1>M3U Library — Settings</h1>
-      <div class="top-actions">
-        <a href="/">← Back to library</a>
-        <button id="logout" class="ghost" hidden>Log out</button>
-      </div>
-    </header>
-
-    <!-- Setup / login forms -->
-    <div id="authCard" class="card" hidden>
-      <h2 id="authTitle">Admin login</h2>
-      <form id="authForm">
-        <label for="authPassword">Password</label>
-        <input type="password" id="authPassword" autocomplete="current-password" required>
-        <div id="authPassword2Wrap" hidden>
-          <label for="authPassword2">Repeat password</label>
-          <input type="password" id="authPassword2" autocomplete="new-password">
-        </div>
-        <p class="hint" id="authHint"></p>
-        <p><button type="submit" class="primary" id="authSubmit">Log in</button></p>
-        <div class="status" id="authStatus"></div>
-      </form>
-    </div>
-
-    <!-- Settings form -->
-    <div id="settingsCard" hidden>
-      <div class="card">
-        <h2>Library &amp; metadata</h2>
-        <form id="settingsForm">
-          <div class="field-head">
-            <label for="M3U_URL">M3U playlist URL</label>
-            <span class="badge" id="badge-M3U_URL">not set</span>
-          </div>
-          <div class="row">
-            <input type="password" id="M3U_URL" autocomplete="off" placeholder="https://provider.example/playlist.m3u">
-            <button type="button" class="ghost" data-toggle="M3U_URL">Show</button>
-          </div>
-          <p class="hint">The playlist link provided by your streaming provider. Stored in the server-side .env file (mode 0600), never in Git.</p>
-
-          <div class="field-head">
-            <label for="TMDB_API_KEY">TMDB API key (v3)</label>
-            <span class="badge" id="badge-TMDB_API_KEY">not set</span>
-          </div>
-          <div class="row">
-            <input type="password" id="TMDB_API_KEY" autocomplete="off" placeholder="optional if bearer token is set">
-            <button type="button" class="ghost" data-toggle="TMDB_API_KEY">Show</button>
-          </div>
-
-          <div class="field-head">
-            <label for="TMDB_BEARER_TOKEN">TMDB bearer token (v4)</label>
-            <span class="badge" id="badge-TMDB_BEARER_TOKEN">not set</span>
-          </div>
-          <div class="row">
-            <input type="password" id="TMDB_BEARER_TOKEN" autocomplete="off" placeholder="optional if API key is set">
-            <button type="button" class="ghost" data-toggle="TMDB_BEARER_TOKEN">Show</button>
-          </div>
-          <p class="hint">One of the two TMDB credentials is enough for movie/series metadata. Get them at themoviedb.org → Settings → API.</p>
-
-          <div class="field-head">
-            <label for="METADATA_LANGUAGE">Metadata language</label>
-            <span class="badge" id="badge-METADATA_LANGUAGE">not set</span>
-          </div>
-          <input type="text" id="METADATA_LANGUAGE" autocomplete="off" placeholder="en-US">
-          <p class="hint">TMDB language tag, e.g. en-US, de-DE, fr-FR.</p>
-
-          <p><button type="submit" class="primary">Save settings</button></p>
-          <div class="status" id="settingsStatus"></div>
-        </form>
-      </div>
-
-      <div class="card">
-        <h2>API key for external clients</h2>
-        <p class="hint">Scripts such as the systemd refresh timer authenticate against protected endpoints with this key via the <code>X-API-Key</code> header.</p>
-        <p>Status: <span class="badge" id="badge-API_KEY">not set</span></p>
-        <div class="row">
-          <input type="text" id="API_KEY" readonly placeholder="••••">
-          <button type="button" class="ghost" id="revealKey">Reveal</button>
-          <button type="button" class="ghost" id="regenKey">Regenerate</button>
-        </div>
-        <div class="status" id="keyStatus"></div>
-      </div>
-
-      <div class="card">
-        <h2>Change admin password</h2>
-        <form id="passwordForm">
-          <label for="currentPassword">Current password</label>
-          <input type="password" id="currentPassword" autocomplete="current-password" required>
-          <label for="newPassword">New password (min. 8 characters)</label>
-          <input type="password" id="newPassword" autocomplete="new-password" required>
-          <label for="newPassword2">Repeat new password</label>
-          <input type="password" id="newPassword2" autocomplete="new-password" required>
-          <p><button type="submit" class="primary">Change password</button></p>
-          <div class="status" id="passwordStatus"></div>
-        </form>
-      </div>
-    </div>
-  </div>
-
-  <script>
-    let csrf = null;
-
-    function setStatus(el, message, ok) {
-      el.textContent = message || "";
-      el.className = "status" + (ok === undefined ? "" : ok ? " ok" : " err");
-    }
-
-    async function apiFetch(url, options = {}) {
-      const method = (options.method || "GET").toUpperCase();
-      const headers = Object.assign({"Content-Type": "application/json"}, options.headers || {});
-      if (csrf && method !== "GET") headers["X-CSRF-Token"] = csrf;
-      const res = await fetch(url, Object.assign({}, options, {headers}));
-      return res;
-    }
-
-    function showAuth(setupRequired) {
-      document.getElementById("authCard").hidden = false;
-      document.getElementById("settingsCard").hidden = true;
-      document.getElementById("logout").hidden = true;
-      document.getElementById("authTitle").textContent = setupRequired ? "First-run setup — choose an admin password" : "Admin login";
-      document.getElementById("authHint").textContent = setupRequired
-        ? "This password protects the settings page and all admin actions. It is stored as a bcrypt hash on the server."
-        : "";
-      document.getElementById("authPassword2Wrap").hidden = !setupRequired;
-      document.getElementById("authSubmit").textContent = setupRequired ? "Create password" : "Log in";
-      document.getElementById("authForm").onsubmit = (event) => {
-        event.preventDefault();
-        setupRequired ? doSetup() : doLogin();
-      };
-    }
-
-    function showSettings() {
-      document.getElementById("authCard").hidden = true;
-      document.getElementById("settingsCard").hidden = false;
-      document.getElementById("logout").hidden = false;
-      loadSettings();
-    }
-
-    async function doSetup() {
-      const pw = document.getElementById("authPassword").value;
-      const pw2 = document.getElementById("authPassword2").value;
-      const status = document.getElementById("authStatus");
-      if (pw !== pw2) return setStatus(status, "Passwords do not match.", false);
-      const res = await fetch("/api/auth/setup", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({password: pw})});
-      const data = await res.json();
-      if (!res.ok) return setStatus(status, data.detail || "Setup failed.", false);
-      csrf = data.csrf;
-      setStatus(status, "Password created.", true);
-      showSettings();
-    }
-
-    async function doLogin() {
-      const pw = document.getElementById("authPassword").value;
-      const status = document.getElementById("authStatus");
-      const res = await fetch("/api/auth/login", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({password: pw})});
-      const data = await res.json();
-      if (!res.ok) return setStatus(status, data.detail || "Login failed.", false);
-      csrf = data.csrf;
-      setStatus(status, "Logged in.", true);
-      showSettings();
-    }
-
-    async function loadSettings() {
-      const res = await apiFetch("/api/admin/settings");
-      if (!res.ok) return;
-      const data = await res.json();
-      if (data.csrf) csrf = data.csrf;
-      for (const [key, info] of Object.entries(data.keys)) {
-        const badge = document.getElementById("badge-" + key);
-        if (badge) {
-          badge.textContent = info.set ? "set" : "not set";
-          badge.className = "badge" + (info.set ? " set" : "");
-        }
-        const input = document.getElementById(key);
-        if (input && key !== "API_KEY") input.value = info.value || "";
-      }
-    }
-
-    document.getElementById("settingsForm").addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const status = document.getElementById("settingsStatus");
-      const body = {};
-      for (const key of ["M3U_URL", "TMDB_API_KEY", "TMDB_BEARER_TOKEN", "METADATA_LANGUAGE"]) {
-        body[key] = document.getElementById(key).value;
-      }
-      const res = await apiFetch("/api/admin/settings", {method: "PUT", body: JSON.stringify(body)});
-      const data = await res.json();
-      if (!res.ok) return setStatus(status, data.detail || "Save failed.", false);
-      setStatus(status, "Saved. Changes take effect immediately.", true);
-      loadSettings();
-    });
-
-    document.getElementById("passwordForm").addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const status = document.getElementById("passwordStatus");
-      const current = document.getElementById("currentPassword").value;
-      const next = document.getElementById("newPassword").value;
-      if (next !== document.getElementById("newPassword2").value) return setStatus(status, "New passwords do not match.", false);
-      const res = await apiFetch("/api/admin/settings/password", {method: "POST", body: JSON.stringify({current, new: next})});
-      const data = await res.json();
-      if (!res.ok) return setStatus(status, data.detail || "Password change failed.", false);
-      setStatus(status, "Password changed.", true);
-      event.target.reset();
-    });
-
-    document.getElementById("revealKey").addEventListener("click", async () => {
-      const res = await apiFetch("/api/admin/settings?reveal=1");
-      if (!res.ok) return;
-      const data = await res.json();
-      document.getElementById("API_KEY").value = (data.keys.API_KEY && data.keys.API_KEY.value) || "";
-    });
-
-    document.getElementById("regenKey").addEventListener("click", async () => {
-      const status = document.getElementById("keyStatus");
-      if (!confirm("Regenerate the API key? Clients using the old key (e.g. the refresh timer) must be updated.")) return;
-      const res = await apiFetch("/api/admin/settings/api-key/regenerate", {method: "POST", body: "{}"});
-      const data = await res.json();
-      if (!res.ok) return setStatus(status, data.detail || "Regeneration failed.", false);
-      document.getElementById("API_KEY").value = data.api_key;
-      setStatus(status, "New API key generated. The refresh timer reads the .env file on every run, so no manual update is needed.", true);
-    });
-
-    document.getElementById("logout").addEventListener("click", async () => {
-      await fetch("/api/auth/logout", {method: "POST", headers: {"Content-Type": "application/json"}, body: "{}"});
-      csrf = null;
-      location.reload();
-    });
-
-    document.querySelectorAll("[data-toggle]").forEach((button) => {
-      button.addEventListener("click", () => {
-        const input = document.getElementById(button.dataset.toggle);
-        const show = input.type === "password";
-        input.type = show ? "text" : "password";
-        button.textContent = show ? "Hide" : "Show";
-      });
-    });
-
-    (async function boot() {
-      const res = await fetch("/api/auth/status");
-      const data = await res.json();
-      if (data.authenticated) {
-        csrf = data.csrf;
-        showSettings();
-      } else {
-        showAuth(data.setup_required);
-      }
-    })();
-  </script>
-</body>
-</html>"""

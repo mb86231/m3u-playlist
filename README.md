@@ -2,8 +2,8 @@
 
 A self-hosted FastAPI service for browsing an M3U playlist: it checks the
 playlist, lists new movies and series, enriches them with TMDB metadata,
-and plays streams in the browser (native, proxied, or server-transcoded)
-or hands them off to PotPlayer on Windows.
+and hands streams off to your local player (one click downloads a
+`.m3u` that opens in PotPlayer, VLC, etc.).
 
 All configuration — playlist URL, TMDB credentials, admin password, API
 key — is entered in a **settings page** after first start and stored
@@ -14,15 +14,16 @@ Git, and there is no manual file editing required for normal operation.
 
 - **Library browser** — movies, series (grouped with episode navigation),
   and live channels, with search, filters, favorites, and watched tracking
+- **Source health check** — server-side validation of the playlist URL
+  (reachable, valid, entry count, or the concrete failure), shown in the
+  library and on the Settings page; a failed refresh never wipes the
+  library
 - **New-content windows** — filter for items added in the last refresh,
   week, month, three months, or six months
 - **TMDB metadata** — posters, overviews, ratings; cached in SQLite with a
   background warm-up and per-item `Info` dialog
-- **Browser playback** — native HLS where possible, proxy fallback, and
-  ffmpeg/VAAPI transcoding for streams the browser cannot play; subtitle
-  extraction to WebVTT
-- **PotPlayer integration** — one click opens the stream in PotPlayer
-  (Windows clients)
+- **External-player handoff** — one click downloads a `.m3u` playlist that
+  opens the stream in PotPlayer, VLC, or any local player
 - **Daily auto-refresh** — systemd timer posts to `/api/refresh` at noon
 - **Admin settings UI** — first-run password setup, then everything is
   configured on the Settings page (`/settings`)
