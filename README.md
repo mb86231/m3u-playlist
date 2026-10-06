@@ -13,6 +13,9 @@ Git, and there is no manual file editing required for normal operation.
 ![M3U Library web UI: dark library view with poster grid, sidebar navigation,
 watched progress, and source health](docs/screenshot.jpg)
 
+![Series detail: episode progress, season tabs, watched toggles, and
+next-episode handoff](docs/screenshot-series.jpg)
+
 ## Features
 
 - **Library browser** — movies, series (grouped with episode navigation),

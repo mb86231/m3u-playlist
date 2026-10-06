@@ -1071,6 +1071,18 @@ __I18N_INLINE__
       applyStats();
     }
 
+    /* Auf der Serien-Detailseite laeuft kein load(): Zaehler einmalig
+       nachladen, sonst zeigt die Sidebar ueberall 0 an. */
+    async function refreshSectionCounts() {
+      const res = await apiFetch("/api/items?limit=1");
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || t("err_load_failed"));
+      if (data.section_counts) {
+        state.sectionCounts = data.section_counts;
+        applyStats();
+      }
+    }
+
     /* Tabs, die laenger offen bleiben, erkennen sonst keinen Refresh:
        Karten auf dem Bildschirm veralten, Klicks landen auf 404-IDs.
        Alle 5 s last_refresh pruefen und bei Aenderung automatisch nachladen. */
@@ -1797,6 +1809,7 @@ __I18N_INLINE__
         els.seriesView.innerHTML = `<div class="empty">${esc(error.message)}</div>`;
       });
       refreshMetadataStatus().catch(() => {});
+      refreshSectionCounts().catch(() => {});
       return;
     }
 
