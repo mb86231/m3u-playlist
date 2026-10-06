@@ -10,6 +10,9 @@ key — is entered in a **settings page** after first start and stored
 server-side with restrictive file permissions. Nothing secret ever lives in
 Git, and there is no manual file editing required for normal operation.
 
+![M3U Library web UI: dark library view with poster grid, sidebar navigation,
+watched progress, and source health](docs/screenshot.jpg)
+
 ## Features
 
 - **Library browser** — movies, series (grouped with episode navigation),
