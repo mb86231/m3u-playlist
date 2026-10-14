@@ -627,7 +627,6 @@ LIBRARY_HTML = r"""<!doctype html>
     .series-meta { color: var(--muted); font-size: 13.5px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
     .series-desc { color: var(--text); font-size: 14px; max-width: 70ch; opacity: 0.92; }
     .series-actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
-    .series-actions .watched-on { color: var(--accent); border-color: var(--accent); }
     .movie-versions-head { margin: 20px 0 10px; font-size: 1rem; }
     .series-progress-row { display: grid; gap: 5px; max-width: 420px; }
     .series-progress-row .labels { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; }
@@ -1716,8 +1715,6 @@ __I18N_INLINE__
       if (!res.ok) throw new Error(data.detail || t("err_movie_load"));
       const movie = data.movie;
       const versions = data.versions || [];
-      let groupWatched = !!movie.is_watched;
-
       const rating = ratingOf(movie);
       const year = yearOf(movie.release_date);
       const backUrl = libraryUrlFor({ kind: pageParams.get("kind") || "", section: pageParams.get("section") || "all" });
@@ -1727,7 +1724,9 @@ __I18N_INLINE__
           <td><span class="ver-tags">${(v.tags || []).map((tag) => `<span class="ver-chip">${esc(tag)}</span>`).join("")}</span></td>
           <td class="ep-title" title="${esc(v.title)}">${esc(v.title)}</td>
           <td class="ep-title">${esc(v.group_name || "")}</td>
-          <td>${v.is_watched ? `<span class="watched-mark" title="${esc(t("watched_label"))}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4.5 12.5 5 5 10-11"/></svg></span>` : ""}</td>
+          <td><button type="button" class="ep-toggle${v.is_watched ? " active" : ""}" data-version-watched="${esc(v.id)}" aria-pressed="${!!v.is_watched}" aria-label="${esc(t("watched_toggle"))}" title="${esc(t("watched_label"))}">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4.5 12.5 5 5 10-11"/></svg>
+          </button></td>
           <td><a class="button primary" href="/watch/${encodeURIComponent(v.id)}.m3u">${esc(t("btn_open"))}</a></td>
         </tr>`;
 
@@ -1750,10 +1749,6 @@ __I18N_INLINE__
                 ${movie.description ? `<p class="series-desc">${esc(movie.description)}</p>` : ""}
                 <div class="series-actions">
                   <a class="button primary" href="/watch/${encodeURIComponent(versions.length ? versions[0].id : movie.id)}.m3u">${esc(t("btn_open"))}</a>
-                  <button type="button" class="button ghost${groupWatched ? " watched-on" : ""}" id="movieWatched" aria-pressed="${groupWatched}" aria-label="${esc(t("watched_toggle"))}">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4.5 12.5 5 5 10-11"/></svg>
-                    ${groupWatched ? esc(t("watched_label")) : esc(t("btn_mark_watched"))}
-                  </button>
                   <button type="button" class="button ghost" id="movieFav" aria-pressed="${!!movie.is_favorite}" aria-label="${esc(t("favorites_toggle"))}">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="${movie.is_favorite ? "currentColor" : "none"}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20.5C7 16.5 3 13.2 3 9.3 3 6.4 5.2 4 8 4c1.6 0 3.1.8 4 2 .9-1.2 2.4-2 4-2 2.8 0 5 2.4 5 5.3 0 3.9-4 7.2-9 11.2z"/></svg>
                     ${movie.is_favorite ? esc(t("btn_favorited")) : esc(t("btn_favorite"))}
@@ -1770,16 +1765,6 @@ __I18N_INLINE__
           </table>` : ""}
         `;
 
-        document.getElementById("movieWatched").addEventListener("click", (event) => {
-          optimisticToggle(movie.id, "watched", "movie", event.currentTarget, {
-            onSuccess: (resData) => {
-              groupWatched = !!resData.is_watched;
-              versions.forEach((v) => { v.is_watched = groupWatched ? 1 : 0; });
-              paint();
-              refreshSectionCountsOnly().catch(() => {});
-            },
-          }).catch((error) => { els.status.textContent = error.message; });
-        });
         document.getElementById("movieFav").addEventListener("click", (event) => {
           optimisticToggle(movie.id, "favorite", "item", event.currentTarget, {
             onSuccess: (resData) => { movie.is_favorite = resData.is_favorite; paint(); },
@@ -1787,6 +1772,19 @@ __I18N_INLINE__
         });
       };
       paint();
+      els.seriesView.addEventListener("click", (event) => {
+        const btn = event.target.closest("[data-version-watched]");
+        if (!btn) return;
+        const vid = btn.dataset.versionWatched;
+        const v = versions.find((x) => x.id === vid);
+        optimisticToggle(vid, "watched", "item", btn, {
+          onSuccess: () => {
+            if (v) v.is_watched = v.is_watched ? 0 : 1;
+            paint();
+            refreshSectionCountsOnly().catch(() => {});
+          },
+        }).catch((error) => { els.status.textContent = error.message; });
+      });
       document.title = `${movie.title} · M3U Library`;
     }
 
