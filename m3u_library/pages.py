@@ -28,6 +28,9 @@ _I18N_JS = r"""
         btn_update: "Update", btn_load_more: "Load more", btn_open: "Open", btn_open_tmdb: "View on TMDB", btn_load_now: "Load now",
         badge_new: "NEW", label_movie: "Movie", label_series: "Series", label_live: "Live", label_tmdb: "TMDB",
         watched_label: "Watched",
+        watched_toggle: "Toggle watched",
+        btn_mark_watched: "Mark as watched",
+        movie_versions: "Versions",
         ver_count: "{n} versions",
         version_pick_title: "Choose version",
         btn_close: "Close",
@@ -36,6 +39,7 @@ _I18N_JS = r"""
         episodes: "{n} episodes", episodes_progress: "{w} / {t} episodes watched",
         episodes_w_of_t: "{w} / {t} episodes",
         col_number: "Number", col_title: "Title", col_watched: "Watched", col_actions: "Actions",
+        col_quality: "Quality", col_group: "Group",
         seasons: "Seasons",
         mark_episode_watched: "Mark episode as watched",
         poster_alt: "Poster of {title}",
@@ -75,6 +79,7 @@ _I18N_JS = r"""
         err_load_failed: "Loading failed",
         err_metadata_status: "Metadata status failed",
         err_series_load: "Could not load the series",
+        err_movie_load: "Could not load the movie",
         btn_next_episode: "Open next episode", btn_all_watched: "All episodes watched", btn_no_episode: "No episode available",
         btn_favorite: "Favorite", btn_favorited: "Favorited",
         settings_title: "Settings",
@@ -149,6 +154,9 @@ _I18N_JS = r"""
         btn_update: "Update", btn_load_more: "Mehr laden", btn_open: "Öffnen", btn_open_tmdb: "Auf TMDB ansehen", btn_load_now: "Jetzt laden",
         badge_new: "NEU", label_movie: "Film", label_series: "Serie", label_live: "Live", label_tmdb: "TMDB",
         watched_label: "Gesehen",
+        watched_toggle: "Gesehen umschalten",
+        btn_mark_watched: "Als gesehen markieren",
+        movie_versions: "Versionen",
         ver_count: "{n} Versionen",
         version_pick_title: "Version wählen",
         btn_close: "Schließen",
@@ -157,6 +165,7 @@ _I18N_JS = r"""
         episodes: "{n} Folgen", episodes_progress: "{w} / {t} Folgen gesehen",
         episodes_w_of_t: "{w} / {t} Folgen",
         col_number: "Nummer", col_title: "Titel", col_watched: "Gesehen", col_actions: "Aktionen",
+        col_quality: "Qualität", col_group: "Gruppe",
         seasons: "Staffeln",
         mark_episode_watched: "Folge als gesehen markieren",
         poster_alt: "Poster von {title}",
@@ -196,6 +205,7 @@ _I18N_JS = r"""
         err_load_failed: "Laden fehlgeschlagen",
         err_metadata_status: "Metadaten-Status fehlgeschlagen",
         err_series_load: "Serie konnte nicht geladen werden",
+        err_movie_load: "Film konnte nicht geladen werden",
         btn_next_episode: "Nächste Folge öffnen", btn_all_watched: "Alle Folgen gesehen", btn_no_episode: "Keine Folge verfügbar",
         btn_favorite: "Favorit", btn_favorited: "Favorisiert",
         settings_title: "Einstellungen",
@@ -617,6 +627,8 @@ LIBRARY_HTML = r"""<!doctype html>
     .series-meta { color: var(--muted); font-size: 13.5px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
     .series-desc { color: var(--text); font-size: 14px; max-width: 70ch; opacity: 0.92; }
     .series-actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    .series-actions .watched-on { color: var(--accent); border-color: var(--accent); }
+    .movie-versions-head { margin: 20px 0 10px; font-size: 1rem; }
     .series-progress-row { display: grid; gap: 5px; max-width: 420px; }
     .series-progress-row .labels { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; }
 
@@ -833,6 +845,10 @@ __I18N_INLINE__
     const pageParams = new URLSearchParams(location.search);
     const pathMatch = location.pathname.match(/^\/series\/([^/]+)/);
     const currentSeriesId = pathMatch ? decodeURIComponent(pathMatch[1]) : null;
+    const moviePathMatch = location.pathname.match(/^\/movie\/([^/]+)/);
+    const currentMovieId = moviePathMatch ? decodeURIComponent(moviePathMatch[1]) : null;
+    /* Detailseiten (Serie oder Film): kein load(), echte Navigation bei View-Wechseln. */
+    const onDetailPage = currentSeriesId || currentMovieId;
 
     const state = {
       items: [],
@@ -1019,7 +1035,7 @@ __I18N_INLINE__
     }
 
     function syncLibraryUrl() {
-      if (currentSeriesId) return;
+      if (onDetailPage) return;
       const query = currentLibraryParams().toString();
       history.replaceState(null, "", query ? `/?${query}` : "/");
     }
@@ -1090,7 +1106,7 @@ __I18N_INLINE__
        Alle 5 s last_refresh pruefen und bei Aenderung automatisch nachladen. */
     let updateCheckInFlight = false;
     async function checkForLibraryUpdates() {
-      if (updateCheckInFlight || currentSeriesId) return;
+      if (updateCheckInFlight || onDetailPage) return;
       if (!state.lastRefresh) return;
       updateCheckInFlight = true;
       try {
@@ -1233,6 +1249,13 @@ __I18N_INLINE__
       return `<button type="button" class="fav-btn${active}" ${attr} aria-label="${esc(t("favorites_toggle"))}" aria-pressed="${!!item.is_favorite}" title="${esc(t("favorites_toggle"))}"><svg width="14" height="14" viewBox="0 0 24 24" fill="${item.is_favorite ? "currentColor" : "none"}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20.5C7 16.5 3 13.2 3 9.3 3 6.4 5.2 4 8 4c1.6 0 3.1.8 4 2 .9-1.2 2.4-2 4-2 2.8 0 5 2.4 5 5.3 0 3.9-4 7.2-9 11.2z"/></svg></button>`;
     }
 
+    /* Watched-Toggle auf dem Karten-Sticker; bei Filmen gruppenweit (alle Versionen). */
+    function watchedButton(item) {
+      if (item.kind !== "movie") return "";
+      const active = item.is_watched ? " active" : "";
+      return `<button type="button" class="fav-btn watched-btn${active}" data-movie-watched="${esc(item.id)}" aria-label="${esc(t("watched_toggle"))}" aria-pressed="${!!item.is_watched}" title="${esc(t("watched_toggle"))}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4.5 12.5 5 5 10-11"/></svg></button>`;
+    }
+
     /* In Weiterschauen: Serie aus der Liste entfernen (setzt den Watch-Fortschritt zurück). */
     function resetButton(item) {
       if (item.kind !== "series" || state.section !== "continue") return "";
@@ -1252,7 +1275,9 @@ __I18N_INLINE__
         const pct = Math.min(100, Math.round((watched / total) * 100));
         progressHtml = `<div class="progress" role="progressbar" aria-valuenow="${watched}" aria-valuemin="0" aria-valuemax="${total}"><span style="width:${pct}%"></span></div><div class="ep-count">${esc(t("episodes_w_of_t", { w: watched, t: total }))}</div>`;
       } else if (item.kind !== "series") {
-        if (item.is_watched) {
+        /* Filme tragen den interaktiven Watched-Button auf dem Sticker;
+           der passive Badge bleibt nur fuer uebrige Nicht-Serien (z.B. Live). */
+        if (item.is_watched && item.kind !== "movie") {
           statusBadge = `<span class="watched-badge" title="${esc(t("watched_label"))}"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4.5 12.5 5 5 10-11"/></svg></span>`;
         }
         if (item.is_new) {
@@ -1269,8 +1294,8 @@ __I18N_INLINE__
         ? `<a class="button ghost ep-open" href="${esc(item.provider_url || "#")}" target="_blank" rel="noreferrer">${esc(t("btn_open_tmdb"))}</a>`
         : (item.kind === "series" || item.episode_count != null)
           ? `<a class="button ghost ep-open" href="/series/${encodeURIComponent(item.id)}${currentLibraryParams().toString() ? `?${currentLibraryParams().toString()}` : ""}">${esc(t("btn_open"))}</a>`
-          : verCount > 1
-            ? `<button type="button" class="button ghost ep-open" data-version-picker="${esc(item.id)}">${esc(t("btn_open"))}</button>`
+          : item.kind === "movie"
+            ? `<a class="button ghost ep-open" href="/movie/${encodeURIComponent(item.id)}${currentLibraryParams().toString() ? `?${currentLibraryParams().toString()}` : ""}">${esc(t("btn_open"))}</a>`
             : `<a class="button ghost ep-open" href="/watch/${encodeURIComponent(item.id)}.m3u">${esc(t("btn_open"))}</a>`;
       return `
         <article class="card" data-card="${esc(item.id)}" data-item-id="${esc(item.id)}">
@@ -1279,6 +1304,7 @@ __I18N_INLINE__
             <div class="poster-top">
               ${rating ? `<span class="rating-badge"><svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2.5l2.9 6 6.6.9-4.8 4.6 1.2 6.5L12 17.4 6.1 20.5l1.2-6.5L2.5 9.4l6.6-.9z"/></svg>${esc(rating)}</span>` : "<span></span>"}
               ${favoriteButton(item)}
+              ${watchedButton(item)}
               ${resetButton(item)}
             </div>
             ${statusBadge}
@@ -1452,6 +1478,14 @@ __I18N_INLINE__
       return data;
     }
 
+    /* Filme: watched toggelt die ganze Versionsgruppe (gleiche Karte). */
+    async function toggleMovie(id, mode) {
+      const res = await apiFetch(`/api/movies/${encodeURIComponent(id)}/${mode}`, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || t("err_update_failed"));
+      return data;
+    }
+
     async function optimisticToggle(id, mode, kind, buttonEl, options = {}) {
       const key = mode === "favorite" ? "is_favorite" : "is_watched";
       const activeClass = mode === "favorite" ? "active" : "active";
@@ -1462,7 +1496,7 @@ __I18N_INLINE__
       buttonEl.classList.toggle(activeClass, !!newValue);
       buttonEl.setAttribute("aria-pressed", String(!!newValue));
       if (item) item[key] = newValue;
-      if (!currentSeriesId) {
+      if (!onDetailPage) {
         const countKey = mode === "favorite" ? "favorites" : "watched";
         state.sectionCounts[countKey] = Math.max(0, (state.sectionCounts[countKey] || 0) + (newValue ? 1 : -1));
         applyStats();
@@ -1470,7 +1504,7 @@ __I18N_INLINE__
       if (options.onOptimisticUpdate) options.onOptimisticUpdate(newValue);
 
       let removedCard = false;
-      const section = currentSeriesId ? null : state.section;
+      const section = onDetailPage ? null : state.section;
       const shouldRemove = (section === "favorites" && mode === "favorite" && !newValue) ||
         ((section === "watched") && mode === "watched" && !newValue) ||
         (section === "continue" && mode === "watched");
@@ -1490,7 +1524,7 @@ __I18N_INLINE__
       }
 
       try {
-        const data = kind === "series" ? await toggleSeries(id, mode) : await toggleItem(id, mode);
+        const data = kind === "series" ? await toggleSeries(id, mode) : kind === "movie" ? await toggleMovie(id, mode) : await toggleItem(id, mode);
         if (item) item[key] = data[key];
         if (options.onSuccess) options.onSuccess(data);
         return data;
@@ -1498,7 +1532,7 @@ __I18N_INLINE__
         buttonEl.classList.toggle(activeClass, !!oldValue);
         buttonEl.setAttribute("aria-pressed", String(!!oldValue));
         if (item) item[key] = oldValue;
-        if (!currentSeriesId) {
+        if (!onDetailPage) {
           const countKey = mode === "favorite" ? "favorites" : "watched";
           state.sectionCounts[countKey] = Math.max(0, (state.sectionCounts[countKey] || 0) + (oldValue ? 1 : -1));
           applyStats();
@@ -1675,6 +1709,87 @@ __I18N_INLINE__
       document.title = `${series.title} · M3U Library`;
     }
 
+    /* ---- Movie detail ----------------------------------------------------------- */
+    async function renderMovieDetail(movieId) {
+      const res = await apiFetch(`/api/movies/${encodeURIComponent(movieId)}?new_window=${encodeURIComponent(state.newWindow || "refresh")}&_=${Date.now()}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || t("err_movie_load"));
+      const movie = data.movie;
+      const versions = data.versions || [];
+      let groupWatched = !!movie.is_watched;
+
+      const rating = ratingOf(movie);
+      const year = yearOf(movie.release_date);
+      const backUrl = libraryUrlFor({ kind: pageParams.get("kind") || "", section: pageParams.get("section") || "all" });
+
+      const versionRow = (v) => `
+        <tr data-version-id="${esc(v.id)}">
+          <td><span class="ver-tags">${(v.tags || []).map((tag) => `<span class="ver-chip">${esc(tag)}</span>`).join("")}</span></td>
+          <td class="ep-title" title="${esc(v.title)}">${esc(v.title)}</td>
+          <td class="ep-title">${esc(v.group_name || "")}</td>
+          <td>${v.is_watched ? `<span class="watched-mark" title="${esc(t("watched_label"))}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4.5 12.5 5 5 10-11"/></svg></span>` : ""}</td>
+          <td><a class="button primary" href="/watch/${encodeURIComponent(v.id)}.m3u">${esc(t("btn_open"))}</a></td>
+        </tr>`;
+
+      const paint = () => {
+        const backdrop = movie.poster_url ? ` style="background-image:url('${esc(posterProxy(movie.poster_url))}')"` : "";
+        els.seriesView.innerHTML = `
+          <div class="crumbs"><a href="${esc(backUrl)}">${esc(t("nav_library"))}</a> <span aria-hidden="true">/</span> ${esc(movie.title)}</div>
+          <div class="series-hero">
+            <div class="series-backdrop"${backdrop} aria-hidden="true"></div>
+            <div class="series-hero-inner">
+              <div class="series-poster">${movie.poster_url ? `<img src="${esc(posterProxy(movie.poster_url))}" alt="${esc(t("poster_alt", { title: movie.title }))}">` : `<div class="poster-fallback">${esc(t("fallback_movie"))}</div>`}</div>
+              <div class="series-info">
+                <h2>${esc(movie.title)}</h2>
+                <div class="series-meta">
+                  ${year ? `<span>${esc(year)}</span>` : ""}
+                  ${rating ? `<span class="rating-badge"><svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2.5l2.9 6 6.6.9-4.8 4.6 1.2 6.5L12 17.4 6.1 20.5l1.2-6.5L2.5 9.4l6.6-.9z"/></svg>${esc(rating)}</span>` : ""}
+                  <span>${esc(t("label_movie"))}</span>
+                  ${versions.length > 1 ? `<span>${esc(t("ver_count", { n: versions.length }))}</span>` : ""}
+                </div>
+                ${movie.description ? `<p class="series-desc">${esc(movie.description)}</p>` : ""}
+                <div class="series-actions">
+                  <a class="button primary" href="/watch/${encodeURIComponent(versions.length ? versions[0].id : movie.id)}.m3u">${esc(t("btn_open"))}</a>
+                  <button type="button" class="button ghost${groupWatched ? " watched-on" : ""}" id="movieWatched" aria-pressed="${groupWatched}" aria-label="${esc(t("watched_toggle"))}">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4.5 12.5 5 5 10-11"/></svg>
+                    ${groupWatched ? esc(t("watched_label")) : esc(t("btn_mark_watched"))}
+                  </button>
+                  <button type="button" class="button ghost" id="movieFav" aria-pressed="${!!movie.is_favorite}" aria-label="${esc(t("favorites_toggle"))}">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="${movie.is_favorite ? "currentColor" : "none"}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20.5C7 16.5 3 13.2 3 9.3 3 6.4 5.2 4 8 4c1.6 0 3.1.8 4 2 .9-1.2 2.4-2 4-2 2.8 0 5 2.4 5 5.3 0 3.9-4 7.2-9 11.2z"/></svg>
+                    ${movie.is_favorite ? esc(t("btn_favorited")) : esc(t("btn_favorite"))}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+          ${versions.length ? `
+          <h3 class="movie-versions-head">${esc(t("movie_versions"))}</h3>
+          <table class="episode-table">
+            <thead><tr><th scope="col">${esc(t("col_quality"))}</th><th scope="col">${esc(t("col_title"))}</th><th scope="col">${esc(t("col_group"))}</th><th scope="col">${esc(t("col_watched"))}</th><th scope="col">${esc(t("col_actions"))}</th></tr></thead>
+            <tbody>${versions.map(versionRow).join("")}</tbody>
+          </table>` : ""}
+        `;
+
+        document.getElementById("movieWatched").addEventListener("click", (event) => {
+          optimisticToggle(movie.id, "watched", "movie", event.currentTarget, {
+            onSuccess: (resData) => {
+              groupWatched = !!resData.is_watched;
+              versions.forEach((v) => { v.is_watched = groupWatched ? 1 : 0; });
+              paint();
+              refreshSectionCountsOnly().catch(() => {});
+            },
+          }).catch((error) => { els.status.textContent = error.message; });
+        });
+        document.getElementById("movieFav").addEventListener("click", (event) => {
+          optimisticToggle(movie.id, "favorite", "item", event.currentTarget, {
+            onSuccess: (resData) => { movie.is_favorite = resData.is_favorite; paint(); },
+          }).catch((error) => { els.status.textContent = error.message; });
+        });
+      };
+      paint();
+      document.title = `${movie.title} · M3U Library`;
+    }
+
     /* ---- Events --------------------------------------------------------------- */
     function bindEvents() {
       let searchTimer = null;
@@ -1693,7 +1808,7 @@ __I18N_INLINE__
 
       document.querySelectorAll("[data-stat-section]").forEach((btn) => {
         btn.addEventListener("click", () => {
-          if (currentSeriesId) {
+          if (onDetailPage) {
             location.href = libraryUrlFor({ kind: els.kind.value, section: btn.dataset.statSection });
             return;
           }
@@ -1706,7 +1821,7 @@ __I18N_INLINE__
       document.querySelectorAll("[data-nav-view]").forEach((btn) => {
         btn.addEventListener("click", () => {
           const view = JSON.parse(btn.dataset.navView);
-          if (currentSeriesId) { location.href = libraryUrlFor(view); return; }
+          if (onDetailPage) { location.href = libraryUrlFor(view); return; }
           els.kind.value = view.kind || "";
           state.section = view.section || "all";
           updateTitle(); syncNav(); applyStats(); syncLibraryUrl();
@@ -1745,6 +1860,13 @@ __I18N_INLINE__
               reset.disabled = false;
               els.status.textContent = error.message;
             });
+          return;
+        }
+        const movieWatched = event.target.closest("[data-movie-watched]");
+        if (movieWatched) {
+          optimisticToggle(movieWatched.dataset.movieWatched, "watched", "movie", movieWatched, {
+            onSuccess: () => { if (state.section === "watched") load(false).catch(() => {}); },
+          }).catch((error) => { els.status.textContent = error.message; });
           return;
         }
         const fav = event.target.closest("[data-favorite],[data-series-favorite]");
@@ -1808,6 +1930,17 @@ __I18N_INLINE__
       els.libraryView.hidden = true;
       els.seriesView.hidden = false;
       renderSeriesDetail(currentSeriesId).catch((error) => {
+        els.seriesView.innerHTML = `<div class="empty">${esc(error.message)}</div>`;
+      });
+      refreshMetadataStatus().catch(() => {});
+      refreshSectionCounts().catch(() => {});
+      return;
+    }
+
+    if (currentMovieId) {
+      els.libraryView.hidden = true;
+      els.seriesView.hidden = false;
+      renderMovieDetail(currentMovieId).catch((error) => {
         els.seriesView.innerHTML = `<div class="empty">${esc(error.message)}</div>`;
       });
       refreshMetadataStatus().catch(() => {});

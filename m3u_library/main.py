@@ -1023,6 +1023,11 @@ def series_page(series_id: str) -> str:
     return LIBRARY_HTML
 
 
+@app.get("/movie/{item_id}", response_class=HTMLResponse)
+def movie_page(item_id: str) -> str:
+    return LIBRARY_HTML
+
+
 @app.get("/api/items")
 async def list_items(
     q: str = "",
@@ -1732,6 +1737,101 @@ async def series_detail(
             season_label = f"Season {episode['season_number']}" if episode["season_number"] else "Episodes"
             seasons.setdefault(season_label, []).append(episode)
         return {"series": series_data, "seasons": seasons, "episode_count": len(episodes)}
+
+
+async def _movie_group(conn: aiosqlite.Connection, item_id: str) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    """Group members for a movie item: all language/quality variants that
+    collapse into one library card. Non-movie items return just themselves.
+    Ordering mirrors the library dedup window (best quality first)."""
+    await conn.create_function("movie_group_key", 2, movie_group_key)
+    await conn.create_function("movie_quality_rank", 1, movie_quality_rank)
+    row = await (await conn.execute(
+        """
+        SELECT items.id, items.kind, items.title AS source_title, metadata.title AS metadata_title
+        FROM items LEFT JOIN metadata ON metadata.item_id = items.id
+        WHERE items.id = ?
+        """,
+        (item_id,),
+    )).fetchone()
+    if not row:
+        return None, []
+    if row["kind"] != "movie":
+        return dict(row), [dict(row)]
+    key = movie_group_key(row["source_title"], row["metadata_title"])
+    rows = await (await conn.execute(
+        """
+        SELECT items.id, items.title AS source_title, items.group_name, items.added_at,
+               items.is_watched, items.is_favorite,
+               metadata.title AS metadata_title, metadata.release_date, metadata.rating,
+               metadata.description, metadata.poster_url
+        FROM items LEFT JOIN metadata ON metadata.item_id = items.id
+        WHERE items.kind = 'movie' AND items.available = 1
+          AND movie_group_key(items.title, metadata.title) = ?
+        ORDER BY movie_quality_rank(items.title) DESC, metadata.title IS NOT NULL DESC,
+                 items.added_at DESC, items.id
+        """,
+        (key,),
+    )).fetchall()
+    return dict(row), [dict(member) for member in rows]
+
+
+@app.get("/api/movies/{item_id}")
+async def movie_detail(item_id: str) -> dict[str, Any]:
+    await async_init_db()
+    async with read_db() as conn:
+        row, members = await _movie_group(conn, item_id)
+        if not row:
+            raise HTTPException(404, "Item not found")
+        if not members:
+            members = [row]
+        best = members[0]
+        return {
+            "movie": {
+                "id": best.get("id", item_id),
+                "title": best.get("metadata_title") or best.get("source_title") or item_id,
+                "release_date": best.get("release_date"),
+                "rating": best.get("rating"),
+                "description": best.get("description"),
+                "poster_url": best.get("poster_url"),
+                "is_watched": max(member.get("is_watched") or 0 for member in members),
+                "is_favorite": max(member.get("is_favorite") or 0 for member in members),
+                "version_count": len(members),
+            },
+            "versions": [
+                {
+                    "id": member["id"],
+                    "title": member.get("source_title") or member["id"],
+                    "group_name": member.get("group_name") or "",
+                    "tags": version_tags(member.get("source_title") or "", member.get("group_name") or ""),
+                    "is_watched": member.get("is_watched") or 0,
+                    "is_favorite": member.get("is_favorite") or 0,
+                }
+                for member in members
+            ],
+        }
+
+
+@app.post("/api/movies/{item_id}/watched")
+async def toggle_movie_watched(item_id: str) -> dict[str, Any]:
+    await async_init_db()
+    async with read_db() as conn:
+        row, members = await _movie_group(conn, item_id)
+        if not row:
+            raise HTTPException(404, "Item not found")
+        if not members:
+            members = [row]
+    value = 0 if max(member.get("is_watched") or 0 for member in members) else 1
+    watched_at = now_iso() if value else None
+    ids = [member["id"] for member in members]
+
+    async def _do_write(conn: aiosqlite.Connection) -> None:
+        await conn.executemany(
+            "UPDATE items SET is_watched = ?, watched_at = ? WHERE id = ?",
+            [(value, watched_at, member_id) for member_id in ids],
+        )
+
+    await write_db(_do_write)
+    return {"id": item_id, "is_watched": value, "updated": len(ids)}
 
 
 def clean_metadata_query(title: str, kind: str) -> str:
