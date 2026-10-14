@@ -89,6 +89,7 @@ pytest
 | Document | Purpose |
 |----------|---------|
 | [`INSTALL.md`](INSTALL.md) | Full installation guide (venv, systemd, timer) |
+| [`CHANGELOG.md`](CHANGELOG.md) | Release history (mirrors the GitHub releases) |
 | [`SECURITY.md`](SECURITY.md) | Security policy, secret management, threat model |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Backend/frontend design, stable IDs, auth model |
 | [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | Deployment pipeline, configuration, backups, troubleshooting |
