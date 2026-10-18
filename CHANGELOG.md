@@ -4,6 +4,16 @@ All notable changes to this project are recorded here. Format:
 [Keep a Changelog](https://keepachangelog.com/), newest on top.
 Versions correspond to [GitHub releases](https://github.com/mb86231/m3u-playlist/releases).
 
+## [Unreleased]
+
+### Changed
+- **Favorites sort by most recently favorited** - migration 4 adds
+  `favorited_at` to `items` and `series_groups` and stamps it on every
+  favorite toggle; the favorites sections order by it, newest first.
+  Favorites set before this change fall back to the addition date.
+  Continue watching and watched already ordered by most recently watched;
+  the ordering is now consistent across all personal sections
+
 ## [v1.1.0] - 2026-10-18
 
 ### Added
