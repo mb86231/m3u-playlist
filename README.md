@@ -37,10 +37,36 @@ and admin password — secrets stay server-side](docs/screenshot-settings.jpg)
 - **Admin settings UI** — first-run password setup, then everything is
   configured on the Settings page (`/settings`)
 
+## What you need
+
+This software is a **library browser and player front-end for M3U
+playlists** — it brings no content of its own and is not a source of
+streams. To use it you need:
+
+1. **A legal IPTV subscription that provides an M3U playlist.** Many
+   licensed providers (regional TV-over-IP services, broadcaster
+   packages, ISP TV bundles) let you export an M3U URL from the customer
+   portal, or issue Xtream Codes login data from which an M3U URL can be
+   derived. Check your provider's terms of service before pointing this
+   app at the playlist: some providers restrict playback to their own
+   apps, and sharing or re-streaming a playlist is almost always
+   prohibited. Use it only for yourself, on your own devices — that is
+   the scenario this software is built for.
+2. **A host** — Python 3.11+ on any machine that can reach the playlist
+   URL and that your browser can reach. A small VM or an always-on home
+   server works well.
+3. **Optionally, a free TMDB API key** for posters and descriptions
+   ([themoviedb.org → Settings → API](https://www.themoviedb.org/settings/api)).
+
+Playback happens in your local player (PotPlayer, VLC, …): the app
+downloads a small `.m3u` handoff file, and the player fetches the stream
+directly from your provider. The server itself only ever fetches the
+playlist and text/image metadata.
+
 ## Quick start
 
 Prerequisites: Python 3.11+, a Debian/Ubuntu-style host (systemd), and an
-M3U playlist URL.
+M3U playlist URL (see [What you need](#what-you-need)).
 
 ```bash
 git clone https://github.com/mb86231/m3u-playlist.git

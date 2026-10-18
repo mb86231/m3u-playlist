@@ -8,7 +8,11 @@ file editing is required.
 
 - Python 3.11+ (Debian 12 ships 3.11)
 - systemd (for service + daily refresh timer)
-- An M3U playlist URL from your streaming provider
+- An M3U playlist URL from a streaming provider you are subscribed to.
+  The app brings no content of its own: use a legal IPTV subscription
+  that provides an M3U export (customer portal or Xtream Codes login),
+  respect the provider's terms, and use the playlist only for yourself
+  on your own devices
 - Optional: a TMDB API key or bearer token for metadata
   ([themoviedb.org → Settings → API](https://www.themoviedb.org/settings/api))
 
