@@ -26,12 +26,12 @@ def test_run_migrations_creates_schema_and_records_version():
         assert "migrations" in tables
 
         version = conn.execute("SELECT MAX(version) FROM migrations").fetchone()[0]
-        assert version == 3
+        assert version == 4
 
         # Re-running on an already-migrated DB should be a no-op.
         migrations.run_migrations(conn)
         version2 = conn.execute("SELECT MAX(version) FROM migrations").fetchone()[0]
-        assert version2 == 3
+        assert version2 == 4
 
         conn.close()
 
@@ -74,13 +74,15 @@ def test_run_migrations_adds_missing_columns():
         assert "is_favorite" in item_columns
         assert "is_watched" in item_columns
         assert "series_id" in item_columns
+        assert "favorited_at" in item_columns
 
         series_columns = {row[1] for row in conn.execute("PRAGMA table_info(series_groups)").fetchall()}
         assert "episode_count" in series_columns
         assert "group_name" in series_columns
         assert "completed_at" in series_columns
+        assert "favorited_at" in series_columns
 
         version = conn.execute("SELECT MAX(version) FROM migrations").fetchone()[0]
-        assert version == 3
+        assert version == 4
 
         conn.close()

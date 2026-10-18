@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS items (
   is_favorite INTEGER NOT NULL DEFAULT 0,
   is_watched INTEGER NOT NULL DEFAULT 0,
   watched_at TEXT,
+  favorited_at TEXT,
   series_id TEXT,
   series_title TEXT,
   season_number INTEGER,
@@ -79,6 +80,7 @@ CREATE TABLE IF NOT EXISTS series_groups (
   is_watched INTEGER NOT NULL DEFAULT 0,
   watched_at TEXT,
   completed_at TEXT,
+  favorited_at TEXT,
   episode_count INTEGER,
   season_count INTEGER,
   watched_episode_count INTEGER,
@@ -251,10 +253,26 @@ def _migration_03_series_completed_at(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_04_favorited_at(conn: sqlite3.Connection) -> None:
+    """Add favorited_at to items and series_groups.
+
+    Records when a favorite was set so the Favorites section can sort by
+    most recently added. Existing favorites keep NULL and fall back to the
+    addition date in the sort order.
+    """
+    item_columns = {row[1] for row in conn.execute("PRAGMA table_info(items)").fetchall()}
+    if "favorited_at" not in item_columns:
+        conn.execute("ALTER TABLE items ADD COLUMN favorited_at TEXT")
+    series_columns = {row[1] for row in conn.execute("PRAGMA table_info(series_groups)").fetchall()}
+    if "favorited_at" not in series_columns:
+        conn.execute("ALTER TABLE series_groups ADD COLUMN favorited_at TEXT")
+
+
 _MIGRATIONS: list[tuple[int, str, MigrationFn]] = [
     (1, "initial schema", _migration_01_initial_schema),
     (2, "fix metadata foreign key target", _migration_02_fix_metadata_foreign_key),
     (3, "series completed_at", _migration_03_series_completed_at),
+    (4, "favorite timestamps", _migration_04_favorited_at),
 ]
 
 

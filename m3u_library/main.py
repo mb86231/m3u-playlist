@@ -1111,7 +1111,8 @@ async def list_items(
             NULL AS episode_count,
             NULL AS season_count,
             NULL AS watched_episode_count,
-            NULL AS completed_at
+            NULL AS completed_at,
+            items.favorited_at
           FROM items
           LEFT JOIN metadata ON metadata.item_id = items.id
           WHERE items.available = 1 AND items.kind != 'series'
@@ -1138,7 +1139,8 @@ async def list_items(
             series_groups.episode_count,
             series_groups.season_count,
             series_groups.watched_episode_count,
-            series_groups.completed_at
+            series_groups.completed_at,
+            series_groups.favorited_at
           FROM series_groups
           WHERE series_groups.episode_count > 0
             )
@@ -1289,7 +1291,9 @@ async def list_items(
         where = " AND ".join(clauses)
 
         order_by = "temp_visible_items.group_is_favorite DESC, temp_visible_items.added_at DESC, temp_visible_items.title COLLATE NOCASE"
-        if sort == "title":
+        if section == "favorites":
+            order_by = "COALESCE(temp_visible_items.favorited_at, temp_visible_items.added_at) DESC, temp_visible_items.title COLLATE NOCASE"
+        elif sort == "title":
             order_by = "temp_visible_items.group_is_favorite DESC, temp_visible_items.title COLLATE NOCASE"
         elif sort == "rating":
             order_by = "temp_visible_items.group_is_favorite DESC, COALESCE(temp_visible_items.rating, 0) DESC, temp_visible_items.title COLLATE NOCASE"
@@ -1665,7 +1669,9 @@ async def list_series(
             clauses.append("1 = 0")
         where = " AND ".join(clauses)
         order_by = "title COLLATE NOCASE"
-        if sort == "rating":
+        if section == "favorites":
+            order_by = "COALESCE(favorited_at, latest_added_at) DESC, title COLLATE NOCASE"
+        elif sort == "rating":
             order_by = "COALESCE(rating, 0) DESC, title COLLATE NOCASE"
         elif sort == "release":
             order_by = "COALESCE(release_date, '') DESC, title COLLATE NOCASE"
@@ -2927,7 +2933,11 @@ async def toggle_favorite(item_id: str) -> dict[str, Any]:
     value = 0 if row["is_favorite"] else 1
 
     async def _do_write(conn: aiosqlite.Connection) -> None:
-        await conn.execute("UPDATE items SET is_favorite = ? WHERE id = ?", (value, item_id))
+        favorited_at = now_iso() if value else None
+        await conn.execute(
+            "UPDATE items SET is_favorite = ?, favorited_at = ? WHERE id = ?",
+            (value, favorited_at, item_id),
+        )
 
     await write_db(_do_write)
     return {"id": item_id, "is_favorite": value}
@@ -2989,7 +2999,11 @@ async def toggle_series_favorite(series_id: str) -> dict[str, Any]:
     value = 0 if row["is_favorite"] else 1
 
     async def _do_write(conn: aiosqlite.Connection) -> None:
-        await conn.execute("UPDATE series_groups SET is_favorite = ? WHERE id = ?", (value, series_id))
+        favorited_at = now_iso() if value else None
+        await conn.execute(
+            "UPDATE series_groups SET is_favorite = ?, favorited_at = ? WHERE id = ?",
+            (value, favorited_at, series_id),
+        )
 
     await write_db(_do_write)
     return {"id": series_id, "is_favorite": value}
