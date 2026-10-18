@@ -78,6 +78,7 @@ CREATE TABLE IF NOT EXISTS series_groups (
   is_favorite INTEGER NOT NULL DEFAULT 0,
   is_watched INTEGER NOT NULL DEFAULT 0,
   watched_at TEXT,
+  completed_at TEXT,
   episode_count INTEGER,
   season_count INTEGER,
   watched_episode_count INTEGER,
@@ -228,9 +229,32 @@ def _migration_02_fix_metadata_foreign_key(conn: sqlite3.Connection) -> None:
         print(f"dropped {orphans} metadata rows with missing items during FK repair")
 
 
+def _migration_03_series_completed_at(conn: sqlite3.Connection) -> None:
+    """Add completed_at to series_groups and backfill it for fully watched series.
+
+    completed_at remembers the moment a series was completed; it survives
+    new episodes arriving later, which powers the "watched - new episodes"
+    section. watched_at alone cannot serve because it is refreshed whenever
+    ANY episode is watched.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(series_groups)").fetchall()}
+    if "completed_at" not in columns:
+        conn.execute("ALTER TABLE series_groups ADD COLUMN completed_at TEXT")
+    conn.execute(
+        """
+        UPDATE series_groups
+        SET completed_at = watched_at
+        WHERE completed_at IS NULL
+          AND episode_count > 0
+          AND watched_episode_count >= episode_count
+        """
+    )
+
+
 _MIGRATIONS: list[tuple[int, str, MigrationFn]] = [
     (1, "initial schema", _migration_01_initial_schema),
     (2, "fix metadata foreign key target", _migration_02_fix_metadata_foreign_key),
+    (3, "series completed_at", _migration_03_series_completed_at),
 ]
 
 

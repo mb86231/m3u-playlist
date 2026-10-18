@@ -74,6 +74,13 @@ async def startup() -> None:
         run_metadata_warmup(last_refresh=last_refresh)
 
 
+@app.on_event("shutdown")
+async def shutdown() -> None:
+    # Close the single-writer connection cleanly; on Windows a lingering
+    # aiosqlite thread can hold the DB file open past teardown.
+    await ASYNC_DB.stop()
+
+
 METADATA_WARMUP_TASK: asyncio.Task | None = None
 @app.middleware("http")
 async def disable_cache(request: Request, call_next):
@@ -317,6 +324,7 @@ def update_series_group_stats(conn: sqlite3.Connection, series_id: str) -> None:
     ).fetchone()
     is_watched = 1 if row["any_watched"] else 0
     watched_at = now_iso() if is_watched else None
+    completed = row["episode_count"] > 0 and row["watched_episode_count"] >= row["episode_count"]
     conn.execute(
         """
         UPDATE series_groups
@@ -326,6 +334,7 @@ def update_series_group_stats(conn: sqlite3.Connection, series_id: str) -> None:
             latest_added_at = ?,
             is_watched = ?,
             watched_at = ?,
+            completed_at = CASE WHEN ? AND completed_at IS NULL THEN ? ELSE completed_at END,
             group_name = ?
         WHERE id = ?
         """,
@@ -335,6 +344,8 @@ def update_series_group_stats(conn: sqlite3.Connection, series_id: str) -> None:
             row["watched_episode_count"],
             row["latest_added_at"],
             is_watched,
+            watched_at,
+            1 if completed else 0,
             watched_at,
             row["group_name"],
             series_id,
@@ -361,6 +372,7 @@ async def _async_update_series_group_stats(conn: aiosqlite.Connection, series_id
     ).fetchone()
     is_watched = 1 if row["any_watched"] else 0
     watched_at = now_iso() if is_watched else None
+    completed = row["episode_count"] > 0 and row["watched_episode_count"] >= row["episode_count"]
     await conn.execute(
         """
         UPDATE series_groups
@@ -370,6 +382,7 @@ async def _async_update_series_group_stats(conn: aiosqlite.Connection, series_id
             latest_added_at = ?,
             is_watched = ?,
             watched_at = ?,
+            completed_at = CASE WHEN ? AND completed_at IS NULL THEN ? ELSE completed_at END,
             group_name = ?
         WHERE id = ?
         """,
@@ -379,6 +392,8 @@ async def _async_update_series_group_stats(conn: aiosqlite.Connection, series_id
             row["watched_episode_count"],
             row["latest_added_at"],
             is_watched,
+            watched_at,
+            1 if completed else 0,
             watched_at,
             row["group_name"],
             series_id,
@@ -411,9 +426,15 @@ def refresh_all_series_group_stats(conn: sqlite3.Connection) -> None:
           latest_added_at = COALESCE((SELECT latest_added_at FROM agg WHERE agg.series_id = series_groups.id), ''),
           is_watched = COALESCE((SELECT any_watched FROM agg WHERE agg.series_id = series_groups.id), 0),
           watched_at = CASE WHEN COALESCE((SELECT any_watched FROM agg WHERE agg.series_id = series_groups.id), 0) = 1 THEN ? ELSE NULL END,
+          completed_at = CASE
+            WHEN completed_at IS NULL
+             AND COALESCE((SELECT episode_count FROM agg WHERE agg.series_id = series_groups.id), 0) > 0
+             AND COALESCE((SELECT watched_episode_count FROM agg WHERE agg.series_id = series_groups.id), 0)
+               >= COALESCE((SELECT episode_count FROM agg WHERE agg.series_id = series_groups.id), 0)
+            THEN ? ELSE completed_at END,
           group_name = COALESCE((SELECT group_name FROM agg WHERE agg.series_id = series_groups.id), '')
         """,
-        (now_iso(),),
+        (now_iso(), now_iso()),
     )
 
 
@@ -1089,7 +1110,8 @@ async def list_items(
             metadata.poster_url,
             NULL AS episode_count,
             NULL AS season_count,
-            NULL AS watched_episode_count
+            NULL AS watched_episode_count,
+            NULL AS completed_at
           FROM items
           LEFT JOIN metadata ON metadata.item_id = items.id
           WHERE items.available = 1 AND items.kind != 'series'
@@ -1115,7 +1137,8 @@ async def list_items(
             series_groups.poster_url,
             series_groups.episode_count,
             series_groups.season_count,
-            series_groups.watched_episode_count
+            series_groups.watched_episode_count,
+            series_groups.completed_at
           FROM series_groups
           WHERE series_groups.episode_count > 0
             )
@@ -1194,7 +1217,8 @@ async def list_items(
                     "all": total,
                     "favorites": await _count_visible("group_is_favorite = 1"),
                     "watched": await _count_visible("group_is_watched = 1"),
-                    "continue": await _count_visible("kind = 'series' AND watched_episode_count > 0 AND watched_episode_count < episode_count"),
+                    "continue": await _count_visible("kind = 'series' AND completed_at IS NULL AND watched_episode_count > 0 AND watched_episode_count < episode_count"),
+                    "watched_new": await _count_visible("kind = 'series' AND completed_at IS NOT NULL AND watched_episode_count < episode_count"),
                     "new": new_count,
                     "trending": len(trending_ids["movie_ids"]),
                     "popular": len(popular_ids["movie_ids"]),
@@ -1237,7 +1261,9 @@ async def list_items(
         elif section == "watched":
             clauses.append("temp_visible_items.group_is_watched = 1")
         elif section == "continue":
-            clauses.append("temp_visible_items.kind = 'series' AND temp_visible_items.watched_episode_count > 0 AND temp_visible_items.watched_episode_count < temp_visible_items.episode_count")
+            clauses.append("temp_visible_items.kind = 'series' AND temp_visible_items.completed_at IS NULL AND temp_visible_items.watched_episode_count > 0 AND temp_visible_items.watched_episode_count < temp_visible_items.episode_count")
+        elif section == "watched_new":
+            clauses.append("temp_visible_items.kind = 'series' AND temp_visible_items.completed_at IS NOT NULL AND temp_visible_items.watched_episode_count < temp_visible_items.episode_count")
         elif section == "new":
             clauses.append("temp_visible_items.group_is_new = 1")
         elif section == "trending":
@@ -1273,6 +1299,8 @@ async def list_items(
             order_by = "temp_visible_items.group_is_new DESC, temp_visible_items.added_at DESC, temp_visible_items.title COLLATE NOCASE"
         elif section == "continue":
             order_by = "temp_visible_items.group_is_favorite DESC, COALESCE(temp_visible_items.watched_at, '') DESC, temp_visible_items.title COLLATE NOCASE"
+        elif section == "watched_new":
+            order_by = "temp_visible_items.group_is_favorite DESC, COALESCE(temp_visible_items.added_at, '') DESC, temp_visible_items.title COLLATE NOCASE"
         elif section == "watched" or sort == "watched":
             order_by = "temp_visible_items.group_is_favorite DESC, COALESCE(temp_visible_items.watched_at, '') DESC, temp_visible_items.title COLLATE NOCASE"
 
@@ -1363,7 +1391,8 @@ async def list_items(
                 "all": total,
                 "favorites": await _count_visible("group_is_favorite = 1"),
                 "watched": await _count_visible("group_is_watched = 1"),
-                "continue": await _count_visible("kind = 'series' AND watched_episode_count > 0 AND watched_episode_count < episode_count"),
+                "continue": await _count_visible("kind = 'series' AND completed_at IS NULL AND watched_episode_count > 0 AND watched_episode_count < episode_count"),
+                "watched_new": await _count_visible("kind = 'series' AND completed_at IS NOT NULL AND watched_episode_count < episode_count"),
                 "new": new_count,
                 "trending": await _count_visible(
                     f"kind = 'movie' AND movie_key IN (SELECT movie_key FROM temp_keyed_items WHERE id IN ({','.join('?' for _ in sorted(trending_ids['movie_ids'])) or 'NULL'}))",
@@ -1612,7 +1641,9 @@ async def list_series(
         elif section == "watched":
             clauses.append("episode_count > 0 AND watched_episode_count >= episode_count")
         elif section == "continue":
-            clauses.append("watched_episode_count > 0 AND watched_episode_count < episode_count")
+            clauses.append("completed_at IS NULL AND watched_episode_count > 0 AND watched_episode_count < episode_count")
+        elif section == "watched_new":
+            clauses.append("completed_at IS NOT NULL AND episode_count > 0 AND watched_episode_count < episode_count")
         elif section == "new":
             clauses.append("latest_added_at >= ?")
             params.append(new_since)
@@ -1642,6 +1673,8 @@ async def list_series(
             order_by = "CASE WHEN latest_added_at >= ? THEN 1 ELSE 0 END DESC, latest_added_at DESC, title COLLATE NOCASE"
         elif section == "continue":
             order_by = "COALESCE(watched_at, '') DESC, title COLLATE NOCASE"
+        elif section == "watched_new":
+            order_by = "COALESCE(latest_added_at, '') DESC, title COLLATE NOCASE"
         elif section == "watched" or sort == "watched":
             order_by = "is_favorite DESC, COALESCE(watched_at, '') DESC, title COLLATE NOCASE"
 
@@ -1688,7 +1721,10 @@ async def list_series(
                 "SELECT COUNT(*) AS count FROM series_groups WHERE episode_count > 0 AND watched_episode_count >= episode_count"
             )).fetchone())["count"],
             "continue": (await (await conn.execute(
-                "SELECT COUNT(*) AS count FROM series_groups WHERE episode_count > 0 AND watched_episode_count > 0 AND watched_episode_count < episode_count"
+                "SELECT COUNT(*) AS count FROM series_groups WHERE episode_count > 0 AND completed_at IS NULL AND watched_episode_count > 0 AND watched_episode_count < episode_count"
+            )).fetchone())["count"],
+            "watched_new": (await (await conn.execute(
+                "SELECT COUNT(*) AS count FROM series_groups WHERE episode_count > 0 AND completed_at IS NOT NULL AND watched_episode_count < episode_count"
             )).fetchone())["count"],
             "trending": len(trending_ids["series_ids"]),
             "popular": len(popular_ids["series_ids"]),
@@ -2971,9 +3007,12 @@ async def toggle_series_watched(series_id: str) -> dict[str, Any]:
     watched_at = now_iso() if value else None
 
     async def _do_write(conn: aiosqlite.Connection) -> None:
+        # Explicit series-wide un-watch also clears the completion memory;
+        # the per-episode toggle keeps it (see _async_update_series_group_stats).
+        completed_at = watched_at if value else None
         await conn.execute(
-            "UPDATE series_groups SET is_watched = ?, watched_at = ? WHERE id = ?",
-            (value, watched_at, series_id),
+            "UPDATE series_groups SET is_watched = ?, watched_at = ?, completed_at = ? WHERE id = ?",
+            (value, watched_at, completed_at, series_id),
         )
         if value:
             await conn.execute(

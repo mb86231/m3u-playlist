@@ -13,6 +13,8 @@ _I18N_JS = r"""
       en: {
         nav_library: "Library", nav_movies: "Movies", nav_series: "Series", nav_live: "Live TV",
         nav_favorites: "Favorites", nav_watched: "Watched", nav_settings: "Settings",
+        nav_watched_new: "Watched - New Episodes",
+        btn_back: "Back",
         sub_library: "Your movies and series. All in one place.",
         library_word: "Library",
         stat_entries: "items", stat_new: "New", stat_popular: "Popular", stat_trending: "Trending",
@@ -139,6 +141,8 @@ _I18N_JS = r"""
       de: {
         nav_library: "Bibliothek", nav_movies: "Filme", nav_series: "Serien", nav_live: "Live TV",
         nav_favorites: "Favoriten", nav_watched: "Gesehen", nav_settings: "Einstellungen",
+        nav_watched_new: "Gesehen - Neue Folgen",
+        btn_back: "Zurück",
         sub_library: "Deine Filme und Serien. Alles an einem Ort.",
         library_word: "Bibliothek",
         stat_entries: "Einträge", stat_new: "Neu", stat_popular: "Beliebt", stat_trending: "Trends",
@@ -603,6 +607,7 @@ LIBRARY_HTML = r"""<!doctype html>
     .crumbs { margin-bottom: 14px; }
     .crumbs a { color: var(--muted); text-decoration: none; font-size: 13.5px; }
     .crumbs a:hover { color: var(--accent); }
+    .btn-back { display: inline-flex; align-items: center; gap: 6px; margin-bottom: 10px; padding: 6px 12px; font-size: 13px; }
     .series-hero {
       position: relative; border-radius: var(--radius); overflow: hidden;
       border: 1px solid var(--line); margin-bottom: 18px;
@@ -713,6 +718,10 @@ LIBRARY_HTML = r"""<!doctype html>
         <button class="nav-item" data-nav-view='{"kind":"","section":"watched"}'>
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m8.5 12.5 2.5 2.5 4.5-5.5"/></svg>
           <span data-i18n="nav_watched">Gesehen</span> <span class="count" id="navCountWatched">0</span>
+        </button>
+        <button class="nav-item" data-nav-view='{"kind":"series","section":"watched_new"}'>
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m8.5 12.5 2.5 2.5 4.5-5.5"/><path d="M18.5 3.5v4M16.5 5.5h4"/></svg>
+          <span data-i18n="nav_watched_new">Gesehen - Neue Folgen</span> <span class="count" id="navCountWatchedNew">0</span>
         </button>
         <button class="nav-item" data-nav-view='{"kind":"series","section":"continue"}'>
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg>
@@ -834,6 +843,7 @@ __I18N_INLINE__
       statFav: document.getElementById("statFav"),
       navCountFav: document.getElementById("navCountFav"),
       navCountWatched: document.getElementById("navCountWatched"),
+      navCountWatchedNew: document.getElementById("navCountWatchedNew"),
       navCountContinue: document.getElementById("navCountContinue"),
       libraryView: document.getElementById("libraryView"),
       seriesView: document.getElementById("seriesView"),
@@ -865,6 +875,7 @@ __I18N_INLINE__
     const SECTION_KEYS = {
       all: "nav_library", new: "stat_new", popular: "stat_popular", trending: "stat_trending",
       upcoming: "stat_upcoming", favorites: "nav_favorites", watched: "nav_watched",
+      watched_new: "nav_watched_new",
       continue: "stat_continue",
     };
     const KIND_KEYS = { movie: "kind_movies", series: "kind_series", live: "nav_live" };
@@ -979,6 +990,7 @@ __I18N_INLINE__
       els.statFav.textContent = formatCount(c.favorites || 0);
       els.navCountFav.textContent = formatCount(c.favorites || 0);
       els.navCountWatched.textContent = formatCount(c.watched || 0);
+      els.navCountWatchedNew.textContent = formatCount(c.watched_new || 0);
       els.navCountContinue.textContent = formatCount(c.continue || 0);
       document.querySelectorAll("[data-stat-section]").forEach((btn) => {
         btn.classList.toggle("active", btn.dataset.statSection === state.section);
@@ -1031,6 +1043,23 @@ __I18N_INLINE__
       if (view.section && view.section !== "all") params.set("section", view.section);
       const query = params.toString();
       return query ? `/?${query}` : "/";
+    }
+
+    /* Zurueck-Ziel: moeglichst die genaue Herkunftsseite (Referrer, gleiche
+       Origin), sonst die uebergebene Fallback-URL. */
+    function backHrefFor(fallbackUrl) {
+      try {
+        const ref = new URL(document.referrer);
+        if (ref.origin === location.origin && ref.pathname !== location.pathname) return ref.href;
+      } catch {}
+      return fallbackUrl;
+    }
+
+    function backButton(fallbackUrl) {
+      return `<a class="button ghost btn-back" href="${esc(backHrefFor(fallbackUrl))}">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>
+        ${esc(t("btn_back"))}
+      </a>`;
     }
 
     function syncLibraryUrl() {
@@ -1600,6 +1629,7 @@ __I18N_INLINE__
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || t("err_series_load"));
       const series = data.series;
+      const backUrl = libraryUrlFor({ kind: pageParams.get("kind") || "", section: pageParams.get("section") || "all" });
       const seasons = data.seasons || {};
       const seasonNames = Object.keys(seasons).sort((a, b) => {
         const num = (s) => { const m = /(\d+)/.exec(s); return m ? parseInt(m[1], 10) : 0; };
@@ -1628,7 +1658,8 @@ __I18N_INLINE__
         </tr>`;
 
       els.seriesView.innerHTML = `
-        <div class="crumbs"><a href="/">${esc(t("nav_library"))}</a> <span aria-hidden="true">/</span> ${esc(series.title)}</div>
+        ${backButton(backUrl)}
+        <div class="crumbs"><a href="${esc(backUrl)}">${esc(t("nav_library"))}</a> <span aria-hidden="true">/</span> ${esc(series.title)}</div>
         <div class="series-hero">
           <div class="series-backdrop"${backdrop} aria-hidden="true"></div>
           <div class="series-hero-inner">
@@ -1733,6 +1764,7 @@ __I18N_INLINE__
       const paint = () => {
         const backdrop = movie.poster_url ? ` style="background-image:url('${esc(posterProxy(movie.poster_url))}')"` : "";
         els.seriesView.innerHTML = `
+          ${backButton(backUrl)}
           <div class="crumbs"><a href="${esc(backUrl)}">${esc(t("nav_library"))}</a> <span aria-hidden="true">/</span> ${esc(movie.title)}</div>
           <div class="series-hero">
             <div class="series-backdrop"${backdrop} aria-hidden="true"></div>
@@ -1918,7 +1950,7 @@ __I18N_INLINE__
     if (pageParams.get("lang")) els.lang.value = pageParams.get("lang");
     if (pageParams.get("uhd") === "1") els.uhd.checked = true;
     if (pageParams.get("section")) {
-      const KNOWN_SECTIONS = ["all", "new", "popular", "trending", "upcoming", "favorites", "watched", "continue"];
+      const KNOWN_SECTIONS = ["all", "new", "popular", "trending", "upcoming", "favorites", "watched", "watched_new", "continue"];
       const sectionParam = pageParams.get("section");
       if (KNOWN_SECTIONS.includes(sectionParam)) state.section = sectionParam;
     }
