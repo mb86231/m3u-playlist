@@ -1716,10 +1716,6 @@ async def series_detail(
         series_row = await (await conn.execute("SELECT * FROM series_groups WHERE id = ?", (series_id,))).fetchone()
         if not series_row:
             raise HTTPException(404, "Series not found")
-        try:
-            series_data = await async_ensure_series_group_metadata(conn, series_row)
-        except Exception:
-            series_data = dict(series_row)
         new_since = await async_new_since_for_window(conn, new_window)
         episode_rows = await (await conn.execute(
             """
@@ -1736,7 +1732,17 @@ async def series_detail(
         for episode in episodes:
             season_label = f"Season {episode['season_number']}" if episode["season_number"] else "Episodes"
             seasons.setdefault(season_label, []).append(episode)
-        return {"series": series_data, "seasons": seasons, "episode_count": len(episodes)}
+    series_data = dict(series_row)
+    # Metadata writes must go through write_db: read_db connections never
+    # commit, so the ensure-update would be silently lost and the library
+    # card would keep showing no poster until the next refresh.
+    title_looks_raw = bool(re.search(r"[\[(](?:19|20)\d{2}[\])]|(?:19|20)\d{2}\s*$", series_row["title"] or ""))
+    if not (series_row["poster_url"] and series_row["description"] and not title_looks_raw):
+        try:
+            series_data = await write_db(lambda c, row=series_row: async_ensure_series_group_metadata(c, row))
+        except Exception:
+            series_data = dict(series_row)
+    return {"series": series_data, "seasons": seasons, "episode_count": len(episodes)}
 
 
 async def _movie_group(conn: aiosqlite.Connection, item_id: str) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
