@@ -4,6 +4,33 @@ All notable changes to this project are recorded here. Format:
 [Keep a Changelog](https://keepachangelog.com/), newest on top.
 Versions correspond to [GitHub releases](https://github.com/mb86231/m3u-playlist/releases).
 
+## [v1.1.0] - 2026-10-18
+
+### Added
+- **Watched - New Episodes section** - main-nav list of series that were
+  fully watched before and have unwatched episodes again (new season or new
+  episode arrivals). The database now remembers the completion moment
+  (`series_groups.completed_at`, migration 3 with backfill for already
+  completed series); Continue Watching is reserved for started,
+  never-completed series
+- **Back button on detail pages** - series and movie info pages have a
+  «Back» button that returns to the exact referring library page (filters
+  and section preserved), falling back to the default library view
+
+### Fixed
+- **Series posters missing in the library** - opening a series detail page
+  fetched missing TMDB metadata but stored it on a read-only database
+  connection that never commits; the poster stayed absent from library
+  cards until the next refresh. Metadata fetched on the detail page is now
+  persisted (`write_db`), so cards show the poster immediately
+- The sqlite writer connection is now closed cleanly on app shutdown
+
+### Changed
+- Navigation order: Favorites - Continue watching - Watched -
+  Watched - New Episodes
+
+[v1.1.0]: https://github.com/mb86231/m3u-playlist/releases/tag/v1.1.0
+
 ## [v1.0.0] - 2026-10-14
 
 First public release.
