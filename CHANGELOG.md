@@ -26,8 +26,8 @@ Versions correspond to [GitHub releases](https://github.com/mb86231/m3u-playlist
 - The sqlite writer connection is now closed cleanly on app shutdown
 
 ### Changed
-- Navigation order: Favorites - Continue watching - Watched -
-  Watched - New Episodes
+- Navigation order: Favorites - Continue watching - Watched - New
+  Episodes - Watched
 
 [v1.1.0]: https://github.com/mb86231/m3u-playlist/releases/tag/v1.1.0
 

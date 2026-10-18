@@ -719,13 +719,13 @@ LIBRARY_HTML = r"""<!doctype html>
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg>
           <span data-i18n="stat_continue">Weiterschauen</span> <span class="count" id="navCountContinue">0</span>
         </button>
-        <button class="nav-item" data-nav-view='{"kind":"","section":"watched"}'>
-          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m8.5 12.5 2.5 2.5 4.5-5.5"/></svg>
-          <span data-i18n="nav_watched">Gesehen</span> <span class="count" id="navCountWatched">0</span>
-        </button>
         <button class="nav-item" data-nav-view='{"kind":"series","section":"watched_new"}'>
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m8.5 12.5 2.5 2.5 4.5-5.5"/><path d="M18.5 3.5v4M16.5 5.5h4"/></svg>
           <span data-i18n="nav_watched_new">Gesehen - Neue Folgen</span> <span class="count" id="navCountWatchedNew">0</span>
+        </button>
+        <button class="nav-item" data-nav-view='{"kind":"","section":"watched"}'>
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m8.5 12.5 2.5 2.5 4.5-5.5"/></svg>
+          <span data-i18n="nav_watched">Gesehen</span> <span class="count" id="navCountWatched">0</span>
         </button>
       </nav>
       <div class="sidebar-footer">
