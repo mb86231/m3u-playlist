@@ -4,7 +4,7 @@ All notable changes to this project are recorded here. Format:
 [Keep a Changelog](https://keepachangelog.com/), newest on top.
 Versions correspond to [GitHub releases](https://github.com/mb86231/m3u-playlist/releases).
 
-## [Unreleased]
+## [v1.1.2] - 2026-10-23
 
 ### Added
 - **Period selector in the New section** - the sorting field is replaced
@@ -65,6 +65,7 @@ Versions correspond to [GitHub releases](https://github.com/mb86231/m3u-playlist
 - Navigation order: Favorites - Continue watching - Watched - New
   Episodes - Watched
 
+[v1.1.2]: https://github.com/mb86231/m3u-playlist/releases/tag/v1.1.2
 [v1.1.1]: https://github.com/mb86231/m3u-playlist/releases/tag/v1.1.1
 [v1.1.0]: https://github.com/mb86231/m3u-playlist/releases/tag/v1.1.0
 
