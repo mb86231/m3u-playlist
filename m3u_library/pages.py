@@ -1729,8 +1729,15 @@ __I18N_INLINE__
         const epId = btn.dataset.episodeWatched;
         optimisticToggle(epId, "watched", "item", btn, {
           onSuccess: () => {
-            const ep = episodes.find((e) => e.id === epId);
-            if (ep) ep.is_watched = ep.is_watched ? 0 : 1;
+            /* Kopie UND Ursprung in `seasons` aktualisieren - renderSeason()
+               liest aus seasons, sonst verschwindet der Haken beim
+               Staffelwechsel bis zum naechsten Reload. */
+            const flip = (e) => { if (e) e.is_watched = e.is_watched ? 0 : 1; };
+            flip(episodes.find((e) => e.id === epId));
+            for (const name of seasonNames) {
+              const src = (seasons[name] || []).find((e) => e.id === epId);
+              if (src) { flip(src); break; }
+            }
             refreshSectionCountsOnly().catch(() => {});
           },
         }).catch((error) => { els.status.textContent = error.message; });

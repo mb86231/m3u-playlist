@@ -4,6 +4,15 @@ All notable changes to this project are recorded here. Format:
 [Keep a Changelog](https://keepachangelog.com/), newest on top.
 Versions correspond to [GitHub releases](https://github.com/mb86231/m3u-playlist/releases).
 
+## [Unreleased]
+
+### Fixed
+- **Episode watched mark lost on season switch** - marking an episode on a
+  series detail page updated a flat copy of the episode list while the
+  season re-render read from the original data, so switching the season
+  tab and back showed the stale state until the next page load; the
+  source episode is now updated along with the copy
+
 ## [v1.1.1] - 2026-10-18
 
 ### Changed
