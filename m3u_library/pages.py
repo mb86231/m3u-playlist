@@ -22,6 +22,7 @@ _I18N_JS = r"""
         stat_upcoming: "Upcoming", stat_favorites: "Favorites", stat_continue: "Continue watching",
         search_placeholder: "Search title or group …",
         filter_type: "Type", filter_group: "Group", filter_sort: "Sorting",
+        filter_new_window: "Period", win_refresh: "Last refresh", win_week: "Last week", win_month: "Last month",
         filter_language: "Language", all_languages: "All languages",
         lang_de: "German", lang_multi: "Multi", lang_en: "English", only_uhd: "4K",
         all_types: "All types", kind_movies: "Movies", kind_series: "Series", kind_live: "Live",
@@ -150,6 +151,7 @@ _I18N_JS = r"""
         stat_upcoming: "Demnächst", stat_favorites: "Favoriten", stat_continue: "Weiterschauen",
         search_placeholder: "Titel oder Gruppe suchen …",
         filter_type: "Typ", filter_group: "Gruppe", filter_sort: "Sortierung",
+        filter_new_window: "Zeitraum", win_refresh: "Letzter Refresh", win_week: "Letzte Woche", win_month: "Letzter Monat",
         filter_language: "Sprache", all_languages: "Alle Sprachen",
         lang_de: "Deutsch", lang_multi: "Multi", lang_en: "Englisch", only_uhd: "4K",
         all_types: "Alle Typen", kind_movies: "Filme", kind_series: "Serien", kind_live: "Live",
@@ -781,13 +783,21 @@ LIBRARY_HTML = r"""<!doctype html>
             <span data-i18n="only_uhd">4K</span>
           </label>
           <select id="group" aria-label="Gruppe" data-i18n-aria="filter_group"><option value="" data-i18n="all_groups">Alle Gruppen</option></select>
-          <div class="sort-field">
+          <div class="sort-field" id="sortField">
             <span class="field-label" data-i18n="filter_sort">Sortierung</span>
             <select id="sort" aria-label="Sortierung" data-i18n-aria="filter_sort">
               <option value="added" data-i18n="sort_added">Neu hinzugefügt</option>
               <option value="title" data-i18n="sort_title">Titel A–Z</option>
               <option value="rating" data-i18n="sort_rating">Bewertung</option>
               <option value="release" data-i18n="sort_release" selected>Erscheinungsjahr</option>
+            </select>
+          </div>
+          <div class="sort-field" id="newWindowField" hidden>
+            <span class="field-label" data-i18n="filter_new_window">Zeitraum</span>
+            <select id="newWindow" aria-label="Zeitraum" data-i18n-aria="filter_new_window">
+              <option value="refresh" data-i18n="win_refresh">Letzter Refresh</option>
+              <option value="7" data-i18n="win_week">Letzte Woche</option>
+              <option value="30" data-i18n="win_month">Letzter Monat</option>
             </select>
           </div>
         </div>
@@ -830,6 +840,9 @@ __I18N_INLINE__
       kind: document.getElementById("kind"),
       group: document.getElementById("group"),
       sort: document.getElementById("sort"),
+      sortField: document.getElementById("sortField"),
+      newWindow: document.getElementById("newWindow"),
+      newWindowField: document.getElementById("newWindowField"),
       lang: document.getElementById("lang"),
       uhd: document.getElementById("uhd"),
       uhdWrap: document.getElementById("uhdWrap"),
@@ -1028,6 +1041,13 @@ __I18N_INLINE__
       return els.kind.value === "movie" || els.kind.value === "series";
     }
 
+    /* In der New-Sektion ersetzt der Zeitraum das Sortierfeld. */
+    function syncNewWindowVisibility() {
+      const isNew = state.section === "new";
+      els.sortField.hidden = isNew;
+      els.newWindowField.hidden = !isNew;
+    }
+
     function syncVersionFilterVisibility() {
       const show = versionFiltersActive();
       els.lang.hidden = !show;
@@ -1069,6 +1089,11 @@ __I18N_INLINE__
     }
 
     function viewTitle() {
+      if (state.section === "new") {
+        /* In der New-Sektion traegt der Titel den gewaehlten Zeitraum. */
+        const winKey = { refresh: "win_refresh", 7: "win_week", 30: "win_month" }[state.newWindow || "refresh"] || "win_refresh";
+        return `${t("stat_new")} · ${t(winKey)}`;
+      }
       if (state.section && state.section !== "all" && SECTION_KEYS[state.section]) return t(SECTION_KEYS[state.section]);
       if (els.kind.value && KIND_KEYS[els.kind.value]) return t(KIND_KEYS[els.kind.value]);
       return t(SECTION_KEYS[state.section] || "nav_library");
@@ -1189,11 +1214,14 @@ __I18N_INLINE__
     /* ---- Loading ----------------------------------------------------------- */
     async function load(append = false) {
       const isSeriesList = els.kind.value === "series";
+      const isNewSection = state.section === "new";
       const params = new URLSearchParams({
         limit: String(state.limit),
         offset: append ? String(state.items.length) : "0",
         section: state.section,
-        sort: els.sort.value,
+        /* In der New-Sektion steuert der Zeitraum die Auswahl; die
+           Reihenfolge ist fest "zuletzt hinzugefuegt". */
+        sort: isNewSection ? "added" : els.sort.value,
         new_window: state.newWindow || "refresh",
       });
       if (els.search.value.trim()) params.set("q", els.search.value.trim());
@@ -1206,6 +1234,7 @@ __I18N_INLINE__
       const endpoint = isSeriesList ? `/api/series?${params}` : `/api/items?${params}`;
       syncLibraryUrl();
       syncVersionFilterVisibility();
+      syncNewWindowVisibility();
       els.status.textContent = append ? t("btn_load_more") + " …" : t("status_loading");
       const res = await apiFetch(endpoint);
       const data = await res.json();
@@ -1866,6 +1895,12 @@ __I18N_INLINE__
       els.kind.addEventListener("change", () => load(false).catch((error) => { els.status.textContent = error.message; }));
       els.group.addEventListener("change", () => load(false).catch((error) => { els.status.textContent = error.message; }));
       els.sort.addEventListener("change", () => load(false).catch((error) => { els.status.textContent = error.message; }));
+      els.newWindow.addEventListener("change", () => {
+        state.newWindow = els.newWindow.value || "refresh";
+        updateTitle();
+        syncLibraryUrl();
+        load(false).catch((error) => { els.status.textContent = error.message; });
+      });
       els.lang.addEventListener("change", () => load(false).catch((error) => { els.status.textContent = error.message; }));
       els.uhd.addEventListener("change", () => load(false).catch((error) => { els.status.textContent = error.message; }));
 
@@ -1991,6 +2026,7 @@ __I18N_INLINE__
       if (KNOWN_SECTIONS.includes(sectionParam)) state.section = sectionParam;
     }
     if (pageParams.get("new_window")) state.newWindow = pageParams.get("new_window");
+    els.newWindow.value = state.newWindow;
 
     if (currentSeriesId) {
       els.libraryView.hidden = true;
@@ -2014,7 +2050,7 @@ __I18N_INLINE__
       return;
     }
 
-    updateTitle(); syncNav(); applyStats(); syncVersionFilterVisibility();
+    updateTitle(); syncNav(); applyStats(); syncVersionFilterVisibility(); syncNewWindowVisibility();
 
     const cache = loadCache();
     const currentParams = {

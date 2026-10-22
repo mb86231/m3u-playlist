@@ -6,6 +6,13 @@ Versions correspond to [GitHub releases](https://github.com/mb86231/m3u-playlist
 
 ## [Unreleased]
 
+### Added
+- **Period selector in the New section** - the sorting field is replaced
+  by a period selector there: last refresh, last week, last month. The
+  view title carries the chosen period (e.g. "New · Last week"), the
+  selection is kept in the URL, and the ordering is fixed to recently
+  added
+
 ### Changed
 - **Playlist refresh without login** - `POST /api/refresh` is now public:
   rebuilding the catalog exposes no secrets and must be available to
