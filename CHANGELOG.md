@@ -12,6 +12,10 @@ Versions correspond to [GitHub releases](https://github.com/mb86231/m3u-playlist
   season re-render read from the original data, so switching the season
   tab and back showed the stale state until the next page load; the
   source episode is now updated along with the copy
+- **Series hero stats stale after episode toggles** - the progress bar,
+  watched counter, percentage, and next-episode button were rendered once
+  from the state at page load and stayed stale after toggling episodes;
+  they are now recomputed from the season data after every toggle
 
 ## [v1.1.1] - 2026-10-18
 

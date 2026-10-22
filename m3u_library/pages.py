@@ -1673,15 +1673,15 @@ __I18N_INLINE__
               </div>
               ${series.description ? `<p class="series-desc">${esc(series.description)}</p>` : ""}
               <div class="series-progress-row">
-                <div class="progress" role="progressbar" aria-valuenow="${watchedCount}" aria-valuemin="0" aria-valuemax="${totalCount}"><span style="width:${pct}%"></span></div>
-                <div class="labels"><span>${esc(t("episodes_progress", { w: watchedCount, t: totalCount }))}</span><span>${pct}%</span></div>
+                <div class="progress" role="progressbar" aria-valuenow="${watchedCount}" aria-valuemin="0" aria-valuemax="${totalCount}"><span id="heroProgressFill" style="width:${pct}%"></span></div>
+                <div class="labels"><span id="heroProgressText">${esc(t("episodes_progress", { w: watchedCount, t: totalCount }))}</span><span id="heroProgressPct">${pct}%</span></div>
               </div>
               <div class="series-actions">
-                ${allWatched
+                <span id="heroNextAction">${allWatched
                   ? `<button type="button" class="primary" disabled>${esc(t("btn_all_watched"))}</button>`
                   : nextEp
                     ? `<a class="button primary" href="/watch/${encodeURIComponent(nextEp.id)}.m3u">${esc(t("btn_next_episode"))}</a>`
-                    : `<button type="button" class="primary" disabled>${esc(t("btn_no_episode"))}</button>`}
+                    : `<button type="button" class="primary" disabled>${esc(t("btn_no_episode"))}</button>`}</span>
                 <button type="button" class="button ghost" id="seriesFav" aria-pressed="${!!series.is_favorite}" aria-label="${esc(t("favorites_toggle"))}">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="${series.is_favorite ? "currentColor" : "none"}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20.5C7 16.5 3 13.2 3 9.3 3 6.4 5.2 4 8 4c1.6 0 3.1.8 4 2 .9-1.2 2.4-2 4-2 2.8 0 5 2.4 5 5.3 0 3.9-4 7.2-9 11.2z"/></svg>
                   ${series.is_favorite ? esc(t("btn_favorited")) : esc(t("btn_favorite"))}
@@ -1713,6 +1713,34 @@ __I18N_INLINE__
         });
       });
 
+      /* Hero-Statistik (Balken, Zaehler, Naechste-Folge-Knopf) nach
+         Episoden-Toggles neu aus `seasons` berechnen - vorher verharrten
+         die Werte auf dem Stand vom Seitenaufruf. */
+      const updateHeroStats = () => {
+        const allEps = seasonNames.flatMap((name) => seasons[name] || []);
+        const w = allEps.filter((ep) => ep.is_watched).length;
+        const total = allEps.length;
+        const p = total ? Math.min(100, Math.round((w / total) * 100)) : 0;
+        const fill = document.getElementById("heroProgressFill");
+        if (fill) fill.style.width = `${p}%`;
+        const bar = fill && fill.closest(".progress");
+        if (bar) bar.setAttribute("aria-valuenow", String(w));
+        const text = document.getElementById("heroProgressText");
+        if (text) text.textContent = t("episodes_progress", { w, t: total });
+        const pctEl = document.getElementById("heroProgressPct");
+        if (pctEl) pctEl.textContent = `${p}%`;
+        const next = document.getElementById("heroNextAction");
+        if (next) {
+          const done = total > 0 && w >= total;
+          const nxt = nextUnwatchedEpisode(seasons);
+          next.innerHTML = done
+            ? `<button type="button" class="primary" disabled>${esc(t("btn_all_watched"))}</button>`
+            : nxt
+              ? `<a class="button primary" href="/watch/${encodeURIComponent(nxt.id)}.m3u">${esc(t("btn_next_episode"))}</a>`
+              : `<button type="button" class="primary" disabled>${esc(t("btn_no_episode"))}</button>`;
+        }
+      };
+
       const favBtn = document.getElementById("seriesFav");
       favBtn.addEventListener("click", () => {
         optimisticToggle(seriesId, "favorite", "series", favBtn, {
@@ -1738,6 +1766,7 @@ __I18N_INLINE__
               const src = (seasons[name] || []).find((e) => e.id === epId);
               if (src) { flip(src); break; }
             }
+            updateHeroStats();
             refreshSectionCountsOnly().catch(() => {});
           },
         }).catch((error) => { els.status.textContent = error.message; });
