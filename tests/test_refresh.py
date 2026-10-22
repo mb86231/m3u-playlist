@@ -47,13 +47,14 @@ def _write_m3u_file(path: Path, urls):
     path.write_text(_m3u(urls), encoding="utf-8")
 
 
-def test_refresh_requires_api_key(client, tmp_path):
+def test_refresh_is_public(client, tmp_path):
+    """Refresh must work for anyone browsing the library (no login)."""
     m3u_path = tmp_path / "test.m3u"
-    _write_m3u_file(m3u_path, [("Test Movie", "http://example.com/movie/1.mp4")])
+    _write_m3u_file(m3u_path, [("Auth Probe Movie", "http://example.com/movie/probe.mp4")])
     os.environ["M3U_URL"] = m3u_path.as_uri()
 
     res = client.post("/api/refresh")
-    assert res.status_code == 403
+    assert res.status_code == 200
 
 
 def test_refresh_inserts_new_items(client, tmp_path):

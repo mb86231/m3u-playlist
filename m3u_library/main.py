@@ -1457,7 +1457,7 @@ def write_state_snapshot() -> dict[str, Any]:
     return {"items": len(items), "series_groups": len(series)}
 
 
-@app.post("/api/refresh", dependencies=[Depends(require_api_key)])
+@app.post("/api/refresh")
 async def refresh() -> dict[str, Any]:
     await async_init_db()
     m3u_url = _resolve_m3u_url()

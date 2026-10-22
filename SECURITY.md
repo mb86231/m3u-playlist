@@ -45,10 +45,16 @@
 
 ### Endpoint protection
 
-Protected: `POST /api/refresh`, `POST /api/metadata/enrich`,
-`POST /api/metadata/warmup`, and everything under `/api/admin/*`.
+Protected: `POST /api/metadata/enrich`, `POST /api/metadata/warmup`, and
+everything under `/api/admin/*`.
 
-Access is granted by either:
+`POST /api/refresh` is intentionally **public**: refreshing the playlist
+rebuilds the catalog from a source the server fetches itself, exposes no
+secrets, and must be available to anyone browsing the library without a
+login. It is idempotent; the daily systemd timer additionally sends
+`X-API-Key`, which remains accepted.
+
+Access to protected endpoints is granted by either:
 
 1. a valid admin **session** (browser, after login), with CSRF header on
    state-changing requests, or

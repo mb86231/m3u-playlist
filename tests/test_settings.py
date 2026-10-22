@@ -276,9 +276,10 @@ def test_api_key_regenerate(client, env):
         headers={"X-CSRF-Token": csrf},
     )
 
-    # The session can still refresh; without session or key it is 403.
+    # After logout the refresh still works (it is public), while a stale
+    # API key remains accepted too.
     assert client.post("/api/auth/logout").status_code == 200
-    assert client.post("/api/refresh").status_code == 403
+    assert client.post("/api/refresh").status_code == 200
     assert client.post("/api/refresh", headers={"X-API-Key": key}).status_code == 200
 
 

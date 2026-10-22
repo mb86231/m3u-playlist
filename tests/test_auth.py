@@ -40,12 +40,12 @@ def client():
 
 
 def test_admin_endpoints_require_api_key(client):
-    for path in ("/api/refresh", "/api/metadata/enrich", "/api/metadata/warmup"):
+    for path in ("/api/metadata/enrich", "/api/metadata/warmup"):
         res = client.post(path)
         assert res.status_code == 403, f"{path} should require API key"
 
-    res = client.post("/api/refresh", headers={"X-API-Key": API_KEY})
-    assert res.status_code == 200
+    res = client.post("/api/refresh")
+    assert res.status_code == 200, "refresh is public (no login needed)"
 
     res = client.post("/api/metadata/warmup", headers={"X-API-Key": API_KEY})
     assert res.status_code == 200
@@ -53,12 +53,13 @@ def test_admin_endpoints_require_api_key(client):
 
 def test_admin_endpoints_reject_same_origin_browser_requests_without_login(client):
     # The old same-origin exemption is gone: browsers must log in on the
-    # settings page (session cookie) or send the API key.
-    res = client.post("/api/refresh", headers={"Sec-Fetch-Site": "same-origin"})
+    # settings page (session cookie) or send the API key. (Refresh is the
+    # documented exception - it is public, see the other auth tests.)
+    res = client.post("/api/metadata/warmup", headers={"Sec-Fetch-Site": "same-origin"})
     assert res.status_code == 403
 
     res = client.post(
-        "/api/refresh",
+        "/api/metadata/warmup",
         headers={"Origin": "http://testserver", "Host": "testserver"},
     )
     assert res.status_code == 403
@@ -67,7 +68,7 @@ def test_admin_endpoints_reject_same_origin_browser_requests_without_login(clien
 def test_admin_endpoints_open_when_no_key_configured(client):
     old_key = os.environ.pop("API_KEY", None)
     try:
-        res = client.post("/api/refresh")
+        res = client.post("/api/metadata/warmup")
         assert res.status_code == 200
     finally:
         if old_key is not None:

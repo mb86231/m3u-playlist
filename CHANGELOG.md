@@ -6,6 +6,12 @@ Versions correspond to [GitHub releases](https://github.com/mb86231/m3u-playlist
 
 ## [Unreleased]
 
+### Changed
+- **Playlist refresh without login** - `POST /api/refresh` is now public:
+  rebuilding the catalog exposes no secrets and must be available to
+  anyone browsing the library. The `X-API-Key` header remains accepted
+  (systemd timer); metadata endpoints and `/api/admin/*` stay protected
+
 ### Fixed
 - **Episode watched mark lost on season switch** - marking an episode on a
   series detail page updated a flat copy of the episode list while the
