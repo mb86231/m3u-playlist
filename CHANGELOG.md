@@ -6,6 +6,18 @@ Versions correspond to [GitHub releases](https://github.com/mb86231/m3u-playlist
 
 ## [Unreleased]
 
+### Added
+- **Update check (GitHub releases)** - a background thread polls the public
+  GitHub releases API once a day (stdlib urllib, no new dependency) and a
+  dismissible chip in the library header announces a newer release next to
+  the source-status chips. Purely informational like the kraken-dca-bot
+  updater: nothing is downloaded or updated automatically. New admin
+  settings toggle "Update check (GitHub)" (persisted in the server .env as
+  `UPDATE_CHECK_ENABLED`, applied live without restart); the installed
+  version is shown in Settings. The first check runs 30 s after startup
+  (so a boot-time network race cannot silently void the check) and a
+  failed fetch is retried once
+
 ### Changed
 - **Season-based watched-new rule** - a series now also surfaces in
   "watched - new episodes" when at least one season is fully watched and

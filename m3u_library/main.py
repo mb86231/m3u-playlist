@@ -24,8 +24,12 @@ from fastapi.security import APIKeyHeader
 
 from m3u_library import migrations
 from m3u_library import settings
+from m3u_library import updater
 from m3u_library.pages import LIBRARY_HTML, SETTINGS_HTML
 from m3u_library.db import db as ASYNC_DB, init_db as async_init_db, read_db, write_db, get_state as async_get_state, set_state as async_set_state
+
+
+UPDATE_CHECKER: updater.UpdateChecker | None = None
 
 
 APP_DIR = Path(__file__).resolve().parent.parent
@@ -56,8 +60,11 @@ app = FastAPI(title="M3U Library")
 
 @app.on_event("startup")
 async def startup() -> None:
+    global UPDATE_CHECKER
     await async_init_db()
     await ASYNC_DB.start()
+    UPDATE_CHECKER = updater.UpdateChecker(enabled=updater.update_check_enabled())
+    UPDATE_CHECKER.start_background()
     async with read_db() as conn:
         last_warmup = await async_get_state(conn, "metadata_warmup_finished_at")
     if not last_warmup:
@@ -78,6 +85,8 @@ async def startup() -> None:
 async def shutdown() -> None:
     # Close the single-writer connection cleanly; on Windows a lingering
     # aiosqlite thread can hold the DB file open past teardown.
+    if UPDATE_CHECKER is not None:
+        UPDATE_CHECKER.stop()
     await ASYNC_DB.stop()
 
 
@@ -913,7 +922,7 @@ async def admin_get_settings(
     keys: dict[str, Any] = {}
     for key in settings.UI_KEYS:
         value = settings.effective_value(key)
-        is_secret = key != "METADATA_LANGUAGE"
+        is_secret = key not in settings.NON_SECRET_KEYS
         keys[key] = {
             "set": bool(value),
             "value": value if (not is_secret or (reveal and value)) else None,
@@ -960,6 +969,8 @@ async def admin_put_settings(
         updates[key] = value
     old_m3u_url = settings.effective_value("M3U_URL")
     settings.apply_updates(updates)
+    if "UPDATE_CHECK_ENABLED" in updates and UPDATE_CHECKER is not None:
+        UPDATE_CHECKER.set_enabled(updater.update_check_enabled())
     new_m3u_url = updates.get("M3U_URL", old_m3u_url) or ""
     if new_m3u_url != old_m3u_url:
         # A new or cleared source must not inherit the previous source's result.
@@ -999,6 +1010,23 @@ async def api_source_status() -> dict[str, Any]:
     """Public: last known check result for the configured M3U source."""
     init_db()
     return read_source_status(_resolve_m3u_url())
+
+
+@app.get("/api/update-status")
+async def api_update_status() -> dict[str, Any]:
+    """Public: GitHub release ticker state for the update chip in the UI."""
+    return updater.status_payload(
+        UPDATE_CHECKER, enabled=updater.update_check_enabled()
+    )
+
+
+@app.post("/api/update-status/dismiss")
+async def api_update_status_dismiss() -> dict[str, Any]:
+    """Public: hide the currently-seen tag until a different one appears."""
+    updater.dismiss_latest(UPDATE_CHECKER)
+    return updater.status_payload(
+        UPDATE_CHECKER, enabled=updater.update_check_enabled()
+    )
 
 
 # ---------------------------------------------------------------------------

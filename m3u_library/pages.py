@@ -70,6 +70,9 @@ _I18N_JS = r"""
         src_unreachable: "Source unreachable",
         src_invalid: "No valid M3U playlist",
         src_empty: "Playlist without entries",
+        update_chip: "App update: {v} available",
+        update_dismiss: "Dismiss",
+        installed_version: "Installed version: {v}",
         entries_in_playlist: "Playlist valid · {n} entries",
         entries_count: "{n} entries",
         last_check: "Last check: {age}",
@@ -108,6 +111,8 @@ _I18N_JS = r"""
         hint_tmdb: "Either TMDB credential is enough for movie and series metadata. Create one at themoviedb.org → Settings → API.",
         lbl_meta_lang: "Metadata language",
         hint_meta_lang: "TMDB language code, e.g. de-DE, en-US, fr-FR.",
+        lbl_update_check: "App update check (GitHub)",
+        hint_update_check: "Checks GitHub once a day for a newer release and shows a notice in the header when one is available. Informational only — updating happens on the server.",
         btn_check_connection: "Check connection",
         checking_source: "Checking source …",
         check_ok: "Check succeeded.",
@@ -199,6 +204,9 @@ _I18N_JS = r"""
         src_unreachable: "Quelle nicht erreichbar",
         src_invalid: "Keine gültige M3U-Playlist",
         src_empty: "Playlist ohne Einträge",
+        update_chip: "App-Update: {v} verfügbar",
+        update_dismiss: "Ausblenden",
+        installed_version: "Installierte Version: {v}",
         entries_in_playlist: "Playlist gültig · {n} Einträge",
         entries_count: "{n} Einträge",
         last_check: "Letzte Prüfung: {age}",
@@ -237,6 +245,8 @@ _I18N_JS = r"""
         hint_tmdb: "Einer der beiden TMDB-Zugänge genügt für Metadaten zu Filmen und Serien. Erstellbar auf themoviedb.org → Einstellungen → API.",
         lbl_meta_lang: "Sprache der Metadaten",
         hint_meta_lang: "TMDB-Sprachcode, z. B. de-DE, en-US, fr-FR.",
+        lbl_update_check: "Update-Benachrichtigung (GitHub)",
+        hint_update_check: "Prüft einmal täglich auf GitHub, ob eine neuere Version verfügbar ist, und zeigt dann einen Hinweis im Header an. Reine Information – aktualisiert wird auf dem Server.",
         btn_check_connection: "Verbindung prüfen",
         checking_source: "Quelle wird geprüft …",
         check_ok: "Prüfung erfolgreich.",
@@ -434,6 +444,17 @@ LIBRARY_HTML = r"""<!doctype html>
     .chip.warn .dot { background: var(--warning); }
     a.chip { text-decoration: none; }
     a.chip:hover { border-color: var(--accent); }
+    .app-update-chip { display: inline-flex; align-items: center; gap: 6px; }
+    .app-update-chip a { color: inherit; text-decoration: none; }
+    .app-update-chip a:hover { text-decoration: underline; }
+    .app-update-chip .chip-dismiss {
+      border: 0; background: none; color: inherit; cursor: pointer;
+      font-size: 13px; line-height: 1; padding: 0 1px; opacity: 0.7;
+    }
+    .app-update-chip .chip-dismiss:hover { opacity: 1; }
+    .app-update-chip[hidden] { display: none; }
+    .check-row { display: flex; align-items: center; gap: 8px; margin: 4px 0 2px; color: var(--text); font-size: 14px; cursor: pointer; }
+    .check-row input { width: auto; min-height: 0; margin: 0; accent-color: var(--accent); cursor: pointer; }
 
     /* Versions-Badges auf Filmkacheln (eigene Zeile unter Jahr/Typ) */
     .card-versions { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; margin-top: 5px; min-height: 0; }
@@ -747,6 +768,11 @@ LIBRARY_HTML = r"""<!doctype html>
             <p class="subtitle" data-i18n="sub_library">Deine Filme und Serien. Alles an einem Ort.</p>
           </div>
           <div class="topbar-actions">
+            <span class="chip warn app-update-chip" id="appUpdateChip" hidden>
+              <span class="dot" aria-hidden="true"></span>
+              <a id="appUpdateLink" href="#" target="_blank" rel="noopener"></a>
+              <button type="button" id="appUpdateDismiss" class="chip-dismiss" data-i18n-aria="update_dismiss" aria-label="Dismiss">×</button>
+            </span>
             <div class="source-chips" id="sourceChips" aria-live="polite"></div>
             <button class="refresh-btn" id="refreshBtn" type="button">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
@@ -990,6 +1016,42 @@ __I18N_INLINE__
         if (age) parts.push(t("last_check", { age }));
       }
       els.sourceChips.innerHTML = `<a class="chip ${chipClass}" href="/settings" title="${esc(t("source_check_title"))}"><span class="dot" aria-hidden="true"></span>${esc(parts.join(" · "))}</a>`;
+    }
+
+    /* ---- App update chip (GitHub release ticker) --------------------------- */
+    async function loadAppUpdate() {
+      try {
+        const res = await fetch("/api/update-status", { cache: "no-store" });
+        if (!res.ok) return;
+        const data = await res.json();
+        renderAppUpdateChip(data);
+      } catch (error) {
+        console.error(error);
+      }
+    }
+
+    function renderAppUpdateChip(data) {
+      const chip = document.getElementById("appUpdateChip");
+      if (!chip) return;
+      if (!data.update_available || !data.latest_version) {
+        chip.hidden = true;
+        return;
+      }
+      const link = document.getElementById("appUpdateLink");
+      link.textContent = t("update_chip", { v: data.latest_version });
+      link.href = data.release_url || "#";
+      chip.hidden = false;
+    }
+
+    async function dismissAppUpdate() {
+      const chip = document.getElementById("appUpdateChip");
+      if (chip) chip.hidden = true;
+      try {
+        const res = await fetch("/api/update-status/dismiss", { method: "POST" });
+        if (!res.ok) loadAppUpdate();
+      } catch (error) {
+        console.error(error);
+      }
     }
 
     /* ---- Stats / nav ------------------------------------------------------ */
@@ -1888,6 +1950,8 @@ __I18N_INLINE__
     /* ---- Events --------------------------------------------------------------- */
     function bindEvents() {
       let searchTimer = null;
+      const appUpdateDismiss = document.getElementById("appUpdateDismiss");
+      if (appUpdateDismiss) appUpdateDismiss.addEventListener("click", dismissAppUpdate);
       els.search.addEventListener("input", () => {
         clearTimeout(searchTimer);
         searchTimer = setTimeout(() => load(false).catch((error) => { els.status.textContent = error.message; }), 300);
@@ -2012,6 +2076,7 @@ __I18N_INLINE__
     updateTitle();
     await refreshAuthStatus();
     loadSourceStatus();
+    loadAppUpdate();
     bindEvents();
 
     const initialGroup = pageParams.get("group") || "";
@@ -2334,6 +2399,12 @@ SETTINGS_HTML = r"""<!doctype html>
             </div>
             <p class="hint" data-i18n="hint_meta_lang">TMDB-Sprachcode, z. B. de-DE, en-US, fr-FR.</p>
 
+            <div class="check-row">
+              <input type="checkbox" id="UPDATE_CHECK_ENABLED" checked>
+              <label for="UPDATE_CHECK_ENABLED" data-i18n="lbl_update_check">Update-Benachrichtigung (GitHub)</label>
+            </div>
+            <p class="hint"><span data-i18n="hint_update_check">Prüft einmal täglich auf GitHub, ob eine neuere Version verfügbar ist, und zeigt dann einen Hinweis im Header an. Reine Information – aktualisiert wird auf dem Server.</span> <span id="installedVersion"></span></p>
+
             <div class="save-row">
               <div class="status" id="settingsStatus" aria-live="polite"></div>
               <button type="submit" class="primary" data-i18n="btn_save">Änderungen speichern</button>
@@ -2435,6 +2506,7 @@ __I18N_INLINE__
       document.getElementById("logout").hidden = false;
       loadSettings();
       loadSourceStatus();
+      loadInstalledVersion();
     }
 
     async function doSetup() {
@@ -2478,6 +2550,10 @@ __I18N_INLINE__
         }
         const input = document.getElementById(key);
         if (input) {
+          if (key === "UPDATE_CHECK_ENABLED") {
+            input.checked = info.value !== "0";
+            continue;
+          }
           // Maskierte Anzeigewerte nie in Eingabefelder schreiben:
           // ein leeres Feld bedeutet beim Speichern «unverändert lassen».
           input.value = info.value || "";
@@ -2532,6 +2608,16 @@ __I18N_INLINE__
       } catch (error) { console.error(error); }
     }
 
+    async function loadInstalledVersion() {
+      try {
+        const res = await fetch("/api/update-status", { cache: "no-store" });
+        if (!res.ok) return;
+        const data = await res.json();
+        const el = document.getElementById("installedVersion");
+        if (el && data.current_version) el.textContent = t("installed_version", { v: data.current_version });
+      } catch (error) { console.error(error); }
+    }
+
     document.getElementById("checkSourceBtn").addEventListener("click", async () => {
       const status = document.getElementById("checkSourceStatus");
       const btn = document.getElementById("checkSourceBtn");
@@ -2565,6 +2651,7 @@ __I18N_INLINE__
         const value = document.getElementById(key).value.trim();
         if (value) body[key] = value;
       }
+      body["UPDATE_CHECK_ENABLED"] = document.getElementById("UPDATE_CHECK_ENABLED").checked ? "1" : "0";
       if (pendingClear.length) body.clear = pendingClear.splice(0);
       const res = await apiFetch("/api/admin/settings", { method: "PUT", body: JSON.stringify(body) });
       const data = await res.json();

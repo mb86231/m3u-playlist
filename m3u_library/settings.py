@@ -38,8 +38,12 @@ UI_KEYS = (
     "TMDB_API_KEY",
     "TMDB_BEARER_TOKEN",
     "METADATA_LANGUAGE",
+    "UPDATE_CHECK_ENABLED",
     "API_KEY",
 )
+
+# Keys that hold no secret — returned and rendered as plain values.
+NON_SECRET_KEYS = frozenset({"METADATA_LANGUAGE", "UPDATE_CHECK_ENABLED"})
 
 _ADMIN_USER = "admin"
 _PASSWORD_MIN_LENGTH = 8
