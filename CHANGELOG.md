@@ -4,7 +4,7 @@ All notable changes to this project are recorded here. Format:
 [Keep a Changelog](https://keepachangelog.com/), newest on top.
 Versions correspond to [GitHub releases](https://github.com/mb86231/m3u-playlist/releases).
 
-## [Unreleased]
+## [v1.1.3] - 2026-10-25
 
 ### Added
 - **Update check (GitHub releases)** - a background thread polls the public
@@ -25,6 +25,8 @@ Versions correspond to [GitHub releases](https://github.com/mb86231/m3u-playlist
   S02 open), even if the series as a whole was never completed. Migration
   5 adds `has_completed_season` with backfill; continue watching excludes
   these series so nothing appears in both sections
+
+[v1.1.3]: https://github.com/mb86231/m3u-playlist/releases/tag/v1.1.3
 
 ## [v1.1.2] - 2026-10-23
 
