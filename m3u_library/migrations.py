@@ -84,6 +84,7 @@ CREATE TABLE IF NOT EXISTS series_groups (
   episode_count INTEGER,
   season_count INTEGER,
   watched_episode_count INTEGER,
+  has_completed_season INTEGER NOT NULL DEFAULT 0,
   latest_added_at TEXT,
   group_name TEXT
 );
@@ -268,11 +269,49 @@ def _migration_04_favorited_at(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE series_groups ADD COLUMN favorited_at TEXT")
 
 
+def _migration_05_has_completed_season(conn: sqlite3.Connection) -> None:
+    """Flag series with a fully watched season plus unwatched newer season.
+
+    Powers the season-based variant of the "watched - new episodes" section:
+    a series qualifies when the user finished at least one whole season and
+    a strictly newer season has unwatched episodes (e.g. Marshals: S01 done,
+    S02 open) - even if the series as a whole was never completed.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(series_groups)").fetchall()}
+    if "has_completed_season" not in columns:
+        conn.execute(
+            "ALTER TABLE series_groups ADD COLUMN has_completed_season INTEGER NOT NULL DEFAULT 0"
+        )
+    conn.execute(
+        """
+        WITH seasons AS (
+          SELECT series_id, season_number,
+                 SUM(CASE WHEN is_watched = 0 THEN 1 ELSE 0 END) AS unwatched
+          FROM items
+          WHERE available = 1 AND series_id IS NOT NULL AND season_number IS NOT NULL
+          GROUP BY series_id, season_number
+        ),
+        flagged AS (
+          SELECT DISTINCT done.series_id
+          FROM seasons done
+          JOIN seasons open
+            ON open.series_id = done.series_id
+           AND open.season_number > done.season_number
+          WHERE done.unwatched = 0 AND open.unwatched > 0
+        )
+        UPDATE series_groups
+        SET has_completed_season = CASE
+          WHEN id IN (SELECT series_id FROM flagged) THEN 1 ELSE 0 END
+        """
+    )
+
+
 _MIGRATIONS: list[tuple[int, str, MigrationFn]] = [
     (1, "initial schema", _migration_01_initial_schema),
     (2, "fix metadata foreign key target", _migration_02_fix_metadata_foreign_key),
     (3, "series completed_at", _migration_03_series_completed_at),
     (4, "favorite timestamps", _migration_04_favorited_at),
+    (5, "completed season flag", _migration_05_has_completed_season),
 ]
 
 

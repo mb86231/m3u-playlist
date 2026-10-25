@@ -26,12 +26,12 @@ def test_run_migrations_creates_schema_and_records_version():
         assert "migrations" in tables
 
         version = conn.execute("SELECT MAX(version) FROM migrations").fetchone()[0]
-        assert version == 4
+        assert version == 5
 
         # Re-running on an already-migrated DB should be a no-op.
         migrations.run_migrations(conn)
         version2 = conn.execute("SELECT MAX(version) FROM migrations").fetchone()[0]
-        assert version2 == 4
+        assert version2 == 5
 
         conn.close()
 
@@ -81,8 +81,9 @@ def test_run_migrations_adds_missing_columns():
         assert "group_name" in series_columns
         assert "completed_at" in series_columns
         assert "favorited_at" in series_columns
+        assert "has_completed_season" in series_columns
 
         version = conn.execute("SELECT MAX(version) FROM migrations").fetchone()[0]
-        assert version == 4
+        assert version == 5
 
         conn.close()

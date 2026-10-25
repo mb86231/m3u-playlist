@@ -4,6 +4,16 @@ All notable changes to this project are recorded here. Format:
 [Keep a Changelog](https://keepachangelog.com/), newest on top.
 Versions correspond to [GitHub releases](https://github.com/mb86231/m3u-playlist/releases).
 
+## [Unreleased]
+
+### Changed
+- **Season-based watched-new rule** - a series now also surfaces in
+  "watched - new episodes" when at least one season is fully watched and
+  a newer season has unwatched episodes (the Marshals case: S01 done,
+  S02 open), even if the series as a whole was never completed. Migration
+  5 adds `has_completed_season` with backfill; continue watching excludes
+  these series so nothing appears in both sections
+
 ## [v1.1.2] - 2026-10-23
 
 ### Added

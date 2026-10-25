@@ -161,3 +161,60 @@ def test_series_wide_unwatch_clears_completion(client, tmp_path):
     counts = _counts(client)
     assert counts["watched_new"] == 0
     assert counts["continue"] == 0  # nothing watched anymore
+
+
+RIDGE_M3U = "\n".join([
+    "#EXTM3U",
+    '#EXTINF:-1 tvg-name="Ridge Patrol S01 E01" group-title="Series",Ridge Patrol S01 E01',
+    "http://x/series/rp/1/1.mp4",
+    '#EXTINF:-1 tvg-name="Ridge Patrol S01 E02" group-title="Series",Ridge Patrol S01 E02',
+    "http://x/series/rp/1/2.mp4",
+])
+
+RIDGE_M3U_WITH_S02 = RIDGE_M3U + "\n" + "\n".join([
+    '#EXTINF:-1 tvg-name="Ridge Patrol S02 E01" group-title="Series",Ridge Patrol S02 E01',
+    "http://x/series/rp/2/1.mp4",
+])
+
+
+def test_completed_season_surfaces_in_watched_new(client, tmp_path):
+    """Season-based rule: a fully watched earlier season plus unwatched
+    episodes in a newer season qualifies for watched_new even when the
+    series as a whole was never completed (the Marshals case: S01 finished
+    while S02 E01 was already sitting unwatched in the catalog)."""
+    # Season 2 already exists before season 1 is completed - that is what
+    # keeps completed_at NULL here (all watched != series completed).
+    _refresh(client, tmp_path, RIDGE_M3U_WITH_S02)
+    ids = _episode_ids(client)
+    s01 = {t: i for t, i in ids.items() if t.startswith("Ridge Patrol") and "S01" in t}
+    assert len(s01) == 2
+
+    for title, ep_id in s01.items():
+        res = client.post(f"/api/items/{ep_id}/watched", headers={"X-API-Key": API_KEY})
+        assert res.status_code == 200
+
+    counts = _counts(client)
+    assert counts["watched_new"] == 1
+    assert counts["continue"] == 0  # not in both sections
+
+    res = client.get("/api/series", params={"section": "watched_new"})
+    assert res.status_code == 200
+    titles = [i["title"] for i in res.json()["items"]]
+    assert any(t.startswith("Ridge Patrol") for t in titles)
+
+    # The series itself was never fully completed; the season flag drives it.
+    conn = sqlite3.connect(str(db_mod.db.path))
+    try:
+        row = conn.execute(
+            "SELECT completed_at, has_completed_season FROM series_groups WHERE title LIKE 'Ridge Patrol%'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row[0] is None
+    assert row[1] == 1
+
+    # Watching the last open episode clears the flag again via the stats recompute.
+    s02 = next(i for t, i in _episode_ids(client).items() if "S02" in t and "Ridge" in t)
+    client.post(f"/api/items/{s02}/watched", headers={"X-API-Key": API_KEY})
+    counts = _counts(client)
+    assert counts["watched_new"] == 0
